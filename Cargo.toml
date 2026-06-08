@@ -1,0 +1,17 @@
+[package]
+name = "galaxy-gen"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "galaxy_gen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "galaxy-gen"
+path = "src/main.rs"
+
+[dependencies]
+glam = { version = "*", features = ["libm"] }
+image = "0.25"
+rayon = "1.12"
