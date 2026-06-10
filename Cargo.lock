@@ -836,10 +836,8 @@ name = "galaxy-gen"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam",
  "image",
  "pollster",
- "rayon",
  "spirv-builder",
  "wgpu",
  "winit",
