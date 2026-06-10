@@ -25,7 +25,7 @@ pub struct GalaxyUniform {
 }
 
 const PI: f32 = 3.141_592_7;
-const TAU: f32 = 6.283_185_5;
+const TAU: f32 = 2.0 * PI;
 
 fn rem_euclid(x: f32, y: f32) -> f32 {
     let r = x % y;
@@ -88,11 +88,6 @@ fn halo_density(dist: f32, p: &GalaxyUniform) -> f32 {
     p.halo_central_density * (1.0 + x).powf(p.halo_slope)
 }
 
-// ── Compute entry point ────────────────────────────────────────
-
-/// One thread per pixel.  Thread group size 8×8 = 64 pixels per
-/// workgroup keeps occupancy high without wasting too many threads
-/// on out-of-bounds pixels near the right / bottom edge.
 #[spirv(compute(threads(8, 8, 1)))]
 pub fn render_density(
     #[spirv(global_invocation_id)] id: UVec3,
@@ -112,4 +107,40 @@ pub fn render_density(
     let d = density(pos, params);
     let idx = (y * params.image_width + x) as usize;
     output[idx] = d;
+}
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct NormUniform {
+    pub min_log: f32,
+    pub inv_range: f32,
+    pub image_width: u32,
+    pub image_height: u32,
+}
+
+#[spirv(compute(threads(8, 8, 1)))]
+pub fn normalize_rgba(
+    #[spirv(global_invocation_id)] id: UVec3,
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] densities: &[f32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] output: &mut [u32],
+    #[spirv(uniform, descriptor_set = 0, binding = 2)] norm: &NormUniform,
+) {
+    let x = id.x;
+    let y = id.y;
+    if x >= norm.image_width || y >= norm.image_height {
+        return;
+    }
+    let idx = (y * norm.image_width + x) as usize;
+
+    let d = densities[idx].max(0.0);
+    let log_d = (d + 1e-12).ln();
+
+    let t = if norm.inv_range > 0.0 {
+        (log_d - norm.min_log) * norm.inv_range
+    } else {
+        0.5
+    };
+
+    let b = (t.clamp(0.0, 1.0) * 255.0) as u32;
+    output[idx] = b | (b << 8) | (b << 16) | (255 << 24);
 }

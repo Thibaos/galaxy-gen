@@ -9,7 +9,7 @@ use winit::{
     window::Window,
 };
 
-const IMAGE_SIZE: u32 = 4096;
+const IMAGE_SIZE: u32 = 1024;
 const GALAXY_EXTENT_LY: f64 = 512_000.0;
 
 struct App {

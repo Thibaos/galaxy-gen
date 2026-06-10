@@ -20,6 +20,7 @@ spirv-builder = { git = "https://github.com/Rust-GPU/rust-gpu" }
 
 [dependencies]
 image = "0.25"
+rayon = "1.12"
 wgpu = { version = "24", features = ["spirv"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
