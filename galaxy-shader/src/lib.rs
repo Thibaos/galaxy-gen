@@ -29,7 +29,11 @@ const TAU: f32 = 2.0 * PI;
 
 fn rem_euclid(x: f32, y: f32) -> f32 {
     let r = x % y;
-    if r < 0.0 { r + y } else { r }
+    if r < 0.0 {
+        r + y
+    } else {
+        r
+    }
 }
 
 fn density(pos: Vec3, p: &GalaxyUniform) -> f32 {
@@ -102,6 +106,8 @@ pub fn render_density(
 
     let wx = (x as f32 / params.image_width as f32 - 0.5) * params.extent;
     let wz = -(y as f32 / params.image_height as f32 - 0.5) * params.extent;
+    // Face-on projection: sample the galactic plane (z = 0).
+    // disk_scale_height has no visible effect on a 2D face-on map.
     let pos = Vec3::new(wx, 0.0, wz);
 
     let d = density(pos, params);

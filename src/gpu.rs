@@ -65,11 +65,18 @@ pub fn compute_galaxy(
     galaxy_extent_ly: f64,
     output_path: Option<&str>,
 ) -> Vec<u8> {
-    assert!(image_size > 0);
+    assert!(
+        image_size > 0 && image_size < 65536,
+        "image_size out of range"
+    );
 
     let total = Instant::now();
 
     let spirv_bytes = include_bytes!(env!("galaxy_shader.spv"));
+    assert!(
+        spirv_bytes.len().is_multiple_of(4),
+        "SPIR-V binary not word-aligned"
+    );
     let spirv_words: Vec<u32> = spirv_bytes
         .chunks_exact(4)
         .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
