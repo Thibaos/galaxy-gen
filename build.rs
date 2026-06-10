@@ -1,0 +1,8 @@
+use spirv_builder::SpirvBuilder;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut builder = SpirvBuilder::new("galaxy-shader", "spirv-unknown-vulkan1.2");
+    builder.build_script.env_shader_spv_path = Some(true);
+    builder.build()?;
+    Ok(())
+}
