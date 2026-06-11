@@ -12,7 +12,7 @@ use winit::{
 
 const INITIAL_EXTENT_LY: f64 = 512_000.0;
 const ZOOM_SPEED: f64 = 1.1;
-const MIN_EXTENT_LY: f64 = 100.0;
+const MIN_EXTENT_LY: f64 = 10.0;
 const MAX_EXTENT_LY: f64 = 2_000_000.0;
 
 const DEFAULT_EXPOSURE: f32 = 0.60;
@@ -413,7 +413,11 @@ impl ApplicationHandler for App {
             }
 
             // ── drag ─────────────────────────────────
-            WindowEvent::MouseInput { state, button, .. } if button == MouseButton::Left => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.dragging = state == ElementState::Pressed;
             }
 
@@ -480,7 +484,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(window) = &self.window {
+        // Only keep redrawing while we have work to do,
+        // otherwise wait for user input.
+        if self.needs_render
+            && let Some(window) = &self.window
+        {
             window.request_redraw();
         }
     }
@@ -493,7 +501,7 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
 
     let mut app = App::new(params);
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     event_loop.run_app(&mut app).unwrap();
 }
