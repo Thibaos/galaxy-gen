@@ -1,6 +1,7 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
 
 use spirv_std::glam::{UVec3, Vec3};
+#[allow(unused)]
 use spirv_std::num_traits::real::Real;
 use spirv_std::spirv;
 
@@ -22,6 +23,8 @@ pub struct GalaxyUniform {
     pub image_width: u32,
     pub image_height: u32,
     pub extent: f32,
+    pub center_x: f32,
+    pub center_y: f32,
 }
 
 const PI: f32 = 3.141_592_7;
@@ -104,10 +107,8 @@ pub fn render_density(
         return;
     }
 
-    let wx = (x as f32 / params.image_width as f32 - 0.5) * params.extent;
-    let wz = -(y as f32 / params.image_height as f32 - 0.5) * params.extent;
-    // Face-on projection: sample the galactic plane (z = 0).
-    // disk_scale_height has no visible effect on a 2D face-on map.
+    let wx = (x as f32 / params.image_width as f32 - 0.5) * params.extent + params.center_x;
+    let wz = -(y as f32 / params.image_height as f32 - 0.5) * params.extent + params.center_y;
     let pos = Vec3::new(wx, 0.0, wz);
 
     let d = density(pos, params);
@@ -118,8 +119,8 @@ pub fn render_density(
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct NormUniform {
-    pub min_log: f32,
-    pub inv_range: f32,
+    pub exposure: f32,
+    pub contrast: f32,
     pub image_width: u32,
     pub image_height: u32,
 }
@@ -141,11 +142,7 @@ pub fn normalize_rgba(
     let d = densities[idx].max(0.0);
     let log_d = (d + 1e-12).ln();
 
-    let t = if norm.inv_range > 0.0 {
-        (log_d - norm.min_log) * norm.inv_range
-    } else {
-        0.5
-    };
+    let t = log_d * norm.contrast + norm.exposure;
 
     let b = (t.clamp(0.0, 1.0) * 255.0) as u32;
     output[idx] = b | (b << 8) | (b << 16) | (255 << 24);

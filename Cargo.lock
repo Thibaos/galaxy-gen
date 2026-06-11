@@ -838,7 +838,6 @@ dependencies = [
  "bytemuck",
  "image",
  "pollster",
- "rayon",
  "spirv-builder",
  "wgpu",
  "winit",
