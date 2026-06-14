@@ -428,7 +428,11 @@ mod tests {
         // with #[repr(C)] packing.
         use std::mem::{offset_of, size_of};
 
-        assert_eq!(size_of::<GalaxyUniform>(), 76, "overall size mismatch with shader");
+        assert_eq!(
+            size_of::<GalaxyUniform>(),
+            76,
+            "overall size mismatch with shader"
+        );
 
         assert_eq!(offset_of!(GalaxyUniform, disk_scale_length), 0);
         assert_eq!(offset_of!(GalaxyUniform, disk_scale_height), 4);
