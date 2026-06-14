@@ -58,6 +58,12 @@ struct App {
     exposure: f32,
     contrast: f32,
 
+    // ── compute pipeline (cached) ────────
+    gpu_compute: Option<gpu::GpuCompute>,
+    rgba_buffer: Option<wgpu::Buffer>,
+    rgba_buf_w: u32,
+    rgba_buf_h: u32,
+
     // ── mouse ─────────────────────────────
     dragging: bool,
     last_mouse: (f64, f64),
@@ -87,6 +93,10 @@ impl App {
             needs_render: true,
             exposure: DEFAULT_EXPOSURE,
             contrast: DEFAULT_CONTRAST,
+            gpu_compute: None,
+            rgba_buffer: None,
+            rgba_buf_w: 0,
+            rgba_buf_h: 0,
             dragging: false,
             last_mouse: (0.0, 0.0),
         }
@@ -213,6 +223,9 @@ impl App {
         self.bind_group_layout = Some(bind_group_layout);
         self.sampler = Some(sampler);
 
+        // create cached compute pipeline resources
+        self.gpu_compute = Some(gpu::GpuCompute::new(self.device.as_ref().unwrap()));
+
         // create the initial texture + bind-group
         self.recreate_texture();
     }
@@ -284,6 +297,7 @@ impl App {
             || self.render_pipeline.is_none()
             || self.bind_group_layout.is_none()
             || self.sampler.is_none()
+            || self.gpu_compute.is_none()
         {
             return;
         }
@@ -293,7 +307,23 @@ impl App {
             self.recreate_texture();
         }
 
-        let (surface, device, queue, config, pipeline, bind_group, texture) = (
+        // ── recreate rgba buffer if dimensions changed ─
+        if self.rgba_buf_w != self.render_w || self.rgba_buf_h != self.render_h {
+            let device = self.device.as_ref().unwrap();
+            let pixel_count = (self.render_w * self.render_h) as usize;
+            let u32_byte_size =
+                (pixel_count * std::mem::size_of::<u32>()) as wgpu::BufferAddress;
+            self.rgba_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("rgba"),
+                size: u32_byte_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+            self.rgba_buf_w = self.render_w;
+            self.rgba_buf_h = self.render_h;
+        }
+
+        let (surface, device, queue, config, pipeline, bind_group, texture, gpu_compute) = (
             self.surface.as_ref().unwrap(),
             self.device.as_ref().unwrap(),
             self.queue.as_ref().unwrap(),
@@ -301,13 +331,17 @@ impl App {
             self.render_pipeline.as_ref().unwrap(),
             self.bind_group.as_ref().unwrap(),
             self.texture.as_ref().unwrap(),
+            self.gpu_compute.as_ref().unwrap(),
         );
 
         // ── re-render galaxy (all on GPU) ────────────
         if self.needs_render {
+            let rgba_buf = self.rgba_buffer.as_ref().unwrap();
             gpu::compute_galaxy(
                 device,
                 queue,
+                gpu_compute,
+                rgba_buf,
                 &self.params,
                 self.render_w,
                 self.render_h,

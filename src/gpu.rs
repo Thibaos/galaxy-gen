@@ -5,6 +5,77 @@ use wgpu::util::DeviceExt;
 
 use crate::galaxy::GalaxyParams;
 
+pub struct GpuCompute {
+    pub module: wgpu::ShaderModule,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub pipeline: wgpu::ComputePipeline,
+}
+
+impl GpuCompute {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let spirv_bytes = include_bytes!(env!("galaxy_shader.spv"));
+        assert!(
+            spirv_bytes.len().is_multiple_of(4),
+            "SPIR-V binary not word-aligned"
+        );
+        let spirv_words: Vec<u32> = spirv_bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("galaxy-shader"),
+            source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spirv_words)),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scene"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("galaxy-scene"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("render_scene"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        Self {
+            module,
+            bind_group_layout,
+            pipeline,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct GalaxyUniform {
@@ -72,6 +143,8 @@ impl GalaxyUniform {
 pub fn compute_galaxy(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    compute: &GpuCompute,
+    rgba_buffer: &wgpu::Buffer,
     params: &GalaxyParams,
     image_w: u32,
     image_h: u32,
@@ -88,22 +161,6 @@ pub fn compute_galaxy(
     );
 
     let total = Instant::now();
-
-    // ── shader module ────────────────────────────────────────
-
-    let spirv_bytes = include_bytes!(env!("galaxy_shader.spv"));
-    assert!(
-        spirv_bytes.len().is_multiple_of(4),
-        "SPIR-V binary not word-aligned"
-    );
-    let spirv_words: Vec<u32> = spirv_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("galaxy-shader"),
-        source: wgpu::ShaderSource::SpirV(std::borrow::Cow::Owned(spirv_words)),
-    });
 
     // ── uniforms ─────────────────────────────────────────────
 
@@ -123,49 +180,9 @@ pub fn compute_galaxy(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    // ── RGBA buffer (GPU-only, never mapped) ─────────────────
-
-    let pixel_count = (image_w * image_h) as usize;
-    let u32_byte_size = (pixel_count * std::mem::size_of::<u32>()) as wgpu::BufferAddress;
-
-    let rgba_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rgba"),
-        size: u32_byte_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    // ── scene pipeline (single-pass unified render) ──────────
-
-    let scene_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("scene"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
     let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene"),
-        layout: &scene_bgl,
+        layout: &compute.bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -176,21 +193,6 @@ pub fn compute_galaxy(
                 resource: rgba_buffer.as_entire_binding(),
             },
         ],
-    });
-
-    let scene_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("scene"),
-        bind_group_layouts: &[&scene_bgl],
-        push_constant_ranges: &[],
-    });
-
-    let scene_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("galaxy-scene"),
-        layout: Some(&scene_pl),
-        module: &module,
-        entry_point: Some("render_scene"),
-        compilation_options: Default::default(),
-        cache: None,
     });
 
     // ── dispatch ─────────────────────────────────────────────
@@ -211,7 +213,7 @@ pub fn compute_galaxy(
             label: Some("scene"),
             timestamp_writes: None,
         });
-        cpass.set_pipeline(&scene_pipeline);
+        cpass.set_pipeline(&compute.pipeline);
         cpass.set_bind_group(0, &scene_bg, &[]);
         cpass.dispatch_workgroups(thread_group_x, thread_group_y, 1);
     }
@@ -219,7 +221,7 @@ pub fn compute_galaxy(
     // copy rgba_buffer → target_texture
     encoder.copy_buffer_to_texture(
         wgpu::TexelCopyBufferInfo {
-            buffer: &rgba_buffer,
+            buffer: rgba_buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * image_w),
