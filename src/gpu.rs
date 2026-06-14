@@ -245,3 +245,176 @@ pub fn compute_galaxy(
 
     println!("  total: {:.2?}", total.elapsed());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::galaxy::GalaxyParams;
+
+    #[test]
+    fn from_params_preserves_values() {
+        let params = GalaxyParams::milky_way();
+        let uniform =
+            GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
+        // Field-by-field assertions to catch field-order bugs
+        assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
+        assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
+        assert_eq!(
+            uniform.disk_central_density,
+            params.disk_central_density as f32
+        );
+        assert_eq!(uniform.arm_count, params.arm_count);
+        assert_eq!(uniform.arm_pitch, params.arm_pitch as f32);
+        assert_eq!(uniform.arm_concentration, params.arm_concentration as f32);
+        assert_eq!(uniform.arm_strength, params.arm_strength as f32);
+        assert_eq!(uniform.bulge_radius, params.bulge_radius as f32);
+        assert_eq!(
+            uniform.bulge_central_density,
+            params.bulge_central_density as f32
+        );
+        assert_eq!(uniform.halo_radius, params.halo_radius as f32);
+        assert_eq!(
+            uniform.halo_central_density,
+            params.halo_central_density as f32
+        );
+        assert_eq!(uniform.halo_slope, params.halo_slope as f32);
+        assert_eq!(uniform.image_width, 1920);
+        assert_eq!(uniform.image_height, 1080);
+        assert_eq!(uniform.extent, 512_000.0_f32);
+        assert_eq!(uniform.center_x, 0.0_f32);
+        assert_eq!(uniform.center_y, 0.0_f32);
+        assert_eq!(uniform.exposure, 0.60);
+        assert_eq!(uniform.log_contrast, 0.04);
+    }
+
+    #[test]
+    fn from_params_with_nonzero_center() {
+        let params = GalaxyParams::milky_way();
+        let uniform =
+            GalaxyUniform::from_params(&params, 800, 600, 100_000.0, 5000.0, -2000.0, 0.50, 0.02);
+        assert_eq!(uniform.center_x, 5000.0_f32);
+        assert_eq!(uniform.center_y, -2000.0_f32);
+        assert_eq!(uniform.extent, 100_000.0_f32);
+        assert_eq!(uniform.image_width, 800);
+        assert_eq!(uniform.image_height, 600);
+        assert_eq!(uniform.exposure, 0.50);
+        assert_eq!(uniform.log_contrast, 0.02);
+    }
+
+    #[test]
+    fn uniform_is_pod() {
+        // Verify bytemuck traits work
+        let params = GalaxyParams::milky_way();
+        let uniform = GalaxyUniform::from_params(&params, 100, 100, 1000.0, 0.0, 0.0, 0.5, 0.05);
+        let _bytes: &[u8] = bytemuck::bytes_of(&uniform);
+        // If this compiles and doesn't panic, Pod+Zeroable is satisfied
+    }
+
+    #[test]
+    fn uniform_struct_size_matches_fields() {
+        // Runtime size check as a cross-check against shader-side layout mismatch
+        let expected = std::mem::size_of::<f32>() * 16 + std::mem::size_of::<u32>() * 3;
+        assert_eq!(std::mem::size_of::<GalaxyUniform>(), expected);
+    }
+
+    // ── Host-side replicas of shader math for characterization ──
+
+    fn host_disk_column(r: f64, p: &GalaxyParams) -> f64 {
+        if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
+            return 0.0;
+        }
+        let radial = (-r / p.disk_scale_length).exp();
+        2.0 * p.disk_scale_height * p.disk_central_density * radial
+    }
+
+    fn host_bulge_column(r: f64, p: &GalaxyParams) -> f64 {
+        if p.bulge_radius <= 0.0 {
+            return 0.0;
+        }
+        let x = r / p.bulge_radius;
+        (4.0 / 3.0) * p.bulge_radius * p.bulge_central_density * (1.0 + x * x).powf(-2.0)
+    }
+
+    fn host_halo_column(r: f64, p: &GalaxyParams) -> f64 {
+        if p.halo_radius <= 0.0 || r < 1e-6 {
+            return p.halo_radius * p.halo_central_density * std::f64::consts::PI;
+        }
+        let x = r / p.halo_radius;
+        std::f64::consts::PI
+            * p.halo_radius
+            * p.halo_central_density
+            * (1.0 + x).powf(p.halo_slope + 1.0)
+    }
+
+    #[test]
+    fn disk_column_decreases_with_radius() {
+        let p = GalaxyParams::milky_way();
+        let d0 = host_disk_column(0.0, &p);
+        let d1 = host_disk_column(p.disk_scale_length, &p);
+        let d2 = host_disk_column(3.0 * p.disk_scale_length, &p);
+        assert!(d0 > 0.0, "disk column at r=0 should be positive");
+        assert!(d1 < d0, "disk should decrease with radius");
+        assert!(d2 < d1, "disk should continue decreasing");
+        // Exponential drop: d1/d0 ≈ 1/e
+        let ratio = d1 / d0;
+        assert!(
+            (ratio - 1.0 / std::f64::consts::E).abs() < 0.01,
+            "d(scale_length)/d(0) should be ~1/e, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn bulge_column_has_plummer_profile() {
+        let p = GalaxyParams::milky_way();
+        let d0 = host_bulge_column(0.0, &p);
+        let d_r = host_bulge_column(p.bulge_radius, &p);
+        assert!(d0 > 0.0, "bulge column at center should be positive");
+        // Plummer: Σ(R) ∝ (1 + R²/a²)^(-2). At R=a, factor is (1+1)^(-2) = 1/4
+        let expected_ratio = 0.25;
+        let actual_ratio = d_r / d0;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 0.01,
+            "bulge at R=a should be ~1/4 of central, got {actual_ratio}"
+        );
+    }
+
+    #[test]
+    fn halo_column_is_positive_and_finite() {
+        let p = GalaxyParams::milky_way();
+        let values: Vec<f64> = [0.0, 1000.0, 10000.0, 50000.0, 100000.0]
+            .iter()
+            .map(|&r| host_halo_column(r, &p))
+            .collect();
+        for (r, v) in [0.0_f64, 1000.0, 10000.0, 50000.0, 100000.0]
+            .iter()
+            .zip(&values)
+        {
+            assert!(v.is_finite(), "halo_column({r}) = {v} is not finite");
+            assert!(*v >= 0.0, "halo_column({r}) = {v} is negative");
+        }
+        // Halo should decrease with radius
+        assert!(values[0] >= values[1], "halo should decrease with radius");
+        assert!(values[1] > values[3], "halo should continue decreasing");
+    }
+
+    #[test]
+    fn zero_params_produce_zero_density() {
+        let zero_params = GalaxyParams {
+            disk_scale_length: 0.0,
+            disk_scale_height: 0.0,
+            disk_central_density: 0.0,
+            arm_count: 0,
+            arm_pitch: 0.0,
+            arm_concentration: 0.0,
+            arm_strength: 0.0,
+            bulge_radius: 0.0,
+            bulge_central_density: 0.0,
+            halo_radius: 0.0,
+            halo_central_density: 0.0,
+            halo_slope: -3.0,
+        };
+        assert_eq!(host_disk_column(1000.0, &zero_params), 0.0);
+        assert_eq!(host_bulge_column(1000.0, &zero_params), 0.0);
+        // halo_radius=0 returns the center value regardless of r
+    }
+}

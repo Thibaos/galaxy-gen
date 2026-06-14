@@ -54,3 +54,62 @@ impl GalaxyParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn milky_way_params_are_finite() {
+        let p = GalaxyParams::milky_way();
+        assert!(p.disk_scale_length.is_finite() && p.disk_scale_length > 0.0);
+        assert!(p.disk_scale_height.is_finite() && p.disk_scale_height > 0.0);
+        assert!(p.disk_central_density.is_finite() && p.disk_central_density > 0.0);
+        assert!(p.arm_count > 0);
+        assert!(p.arm_pitch.is_finite());
+        assert!(p.arm_concentration.is_finite() && p.arm_concentration > 0.0);
+        assert!(p.arm_strength.is_finite());
+        assert!(p.bulge_radius.is_finite() && p.bulge_radius > 0.0);
+        assert!(p.bulge_central_density.is_finite() && p.bulge_central_density > 0.0);
+        assert!(p.halo_radius.is_finite() && p.halo_radius > 0.0);
+        assert!(p.halo_central_density.is_finite());
+        assert!(p.halo_slope.is_finite() && p.halo_slope < 0.0);
+    }
+
+    #[test]
+    fn milky_way_params_clone_is_equal() {
+        let p1 = GalaxyParams::milky_way();
+        let p2 = p1.clone();
+        // Compare fields individually since we didn't derive PartialEq
+        assert_eq!(
+            p1.disk_scale_length.to_bits(),
+            p2.disk_scale_length.to_bits()
+        );
+        assert_eq!(
+            p1.disk_central_density.to_bits(),
+            p2.disk_central_density.to_bits()
+        );
+        assert_eq!(p1.arm_count, p2.arm_count);
+        assert_eq!(p1.arm_pitch.to_bits(), p2.arm_pitch.to_bits());
+        assert_eq!(p1.bulge_radius.to_bits(), p2.bulge_radius.to_bits());
+        assert_eq!(p1.halo_slope.to_bits(), p2.halo_slope.to_bits());
+    }
+
+    #[test]
+    fn milky_way_params_cast_to_f32_is_finite() {
+        let p = GalaxyParams::milky_way();
+        // Verify all fields can be cast to f32 without overflow/inf
+        assert!((p.disk_scale_length as f32).is_finite());
+        assert!((p.disk_scale_height as f32).is_finite());
+        assert!((p.disk_central_density as f32).is_finite());
+        assert!((p.arm_pitch as f32).is_finite());
+        assert!((p.arm_concentration as f32).is_finite());
+        assert!((p.arm_strength as f32).is_finite());
+        assert!((p.bulge_radius as f32).is_finite());
+        assert!((p.bulge_central_density as f32).is_finite());
+        assert!((p.halo_radius as f32).is_finite());
+        assert!((p.halo_central_density as f32).is_finite());
+        // halo_slope is negative; casting to f32 is fine
+        assert!((p.halo_slope as f32).is_finite());
+    }
+}
