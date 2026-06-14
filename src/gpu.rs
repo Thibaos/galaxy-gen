@@ -76,6 +76,9 @@ impl GpuCompute {
     }
 }
 
+/// GPU uniform buffer matching `galaxy-shader/src/lib.rs:GalaxyUniform`.
+/// The two definitions MUST stay in sync. Field-offset tests in this
+/// module's `#[cfg(test)]` block will catch mismatches at test time.
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
 pub struct GalaxyUniform {
@@ -416,5 +419,35 @@ mod tests {
         assert_eq!(host_disk_column(1000.0, &zero_params), 0.0);
         assert_eq!(host_bulge_column(1000.0, &zero_params), 0.0);
         // halo_radius=0 returns the center value regardless of r
+    }
+
+    #[test]
+    fn galaxy_uniform_field_offsets_match_shader_layout() {
+        // These offsets MUST match the shader-side GalaxyUniform layout.
+        // The shader uses spirv-std glam types (f32 = 4 bytes, u32 = 4 bytes)
+        // with #[repr(C)] packing.
+        use std::mem::{offset_of, size_of};
+
+        assert_eq!(size_of::<GalaxyUniform>(), 76, "overall size mismatch with shader");
+
+        assert_eq!(offset_of!(GalaxyUniform, disk_scale_length), 0);
+        assert_eq!(offset_of!(GalaxyUniform, disk_scale_height), 4);
+        assert_eq!(offset_of!(GalaxyUniform, disk_central_density), 8);
+        assert_eq!(offset_of!(GalaxyUniform, arm_count), 12);
+        assert_eq!(offset_of!(GalaxyUniform, arm_pitch), 16);
+        assert_eq!(offset_of!(GalaxyUniform, arm_concentration), 20);
+        assert_eq!(offset_of!(GalaxyUniform, arm_strength), 24);
+        assert_eq!(offset_of!(GalaxyUniform, bulge_radius), 28);
+        assert_eq!(offset_of!(GalaxyUniform, bulge_central_density), 32);
+        assert_eq!(offset_of!(GalaxyUniform, halo_radius), 36);
+        assert_eq!(offset_of!(GalaxyUniform, halo_central_density), 40);
+        assert_eq!(offset_of!(GalaxyUniform, halo_slope), 44);
+        assert_eq!(offset_of!(GalaxyUniform, image_width), 48);
+        assert_eq!(offset_of!(GalaxyUniform, image_height), 52);
+        assert_eq!(offset_of!(GalaxyUniform, extent), 56);
+        assert_eq!(offset_of!(GalaxyUniform, center_x), 60);
+        assert_eq!(offset_of!(GalaxyUniform, center_y), 64);
+        assert_eq!(offset_of!(GalaxyUniform, exposure), 68);
+        assert_eq!(offset_of!(GalaxyUniform, log_contrast), 72);
     }
 }
