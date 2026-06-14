@@ -1,7 +1,6 @@
 use spirv_builder::SpirvBuilder;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Tell cargo to re-run this build script when the shader sources change.
     println!("cargo:rerun-if-changed=galaxy-shader/src/");
     println!("cargo:rerun-if-changed=galaxy-shader/Cargo.toml");
 
