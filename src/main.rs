@@ -464,11 +464,10 @@ impl ApplicationHandler for App {
                     let dx = cx - lx;
                     let dy = cy - ly;
 
-                    let ly_per_px_x = self.extent_ly / self.render_w as f64;
-                    let ly_per_px_y = self.extent_ly / self.render_h as f64;
+                    let ly_per_px = self.extent_ly / self.render_w as f64;
 
-                    self.center_x -= dx * ly_per_px_x;
-                    self.center_y += dy * ly_per_px_y;
+                    self.center_x -= dx * ly_per_px;
+                    self.center_y += dy * ly_per_px;
 
                     self.needs_render = true;
                 }
@@ -504,8 +503,9 @@ impl ApplicationHandler for App {
                     let fy = self.last_mouse.1 / self.render_h as f64;
 
                     let extent_delta = old_extent - self.extent_ly;
+                    let y_aspect = self.render_h as f64 / self.render_w as f64;
                     self.center_x += (fx - 0.5) * extent_delta;
-                    self.center_y -= (fy - 0.5) * extent_delta;
+                    self.center_y -= (fy - 0.5) * extent_delta * y_aspect;
                 }
 
                 self.needs_render = true;

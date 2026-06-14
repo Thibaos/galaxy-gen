@@ -1,4 +1,5 @@
 #![cfg_attr(target_arch = "spirv", no_std)]
+#![allow(clippy::manual_saturating_arithmetic)]
 
 use spirv_std::glam::{UVec3, Vec3};
 #[allow(unused)]
@@ -41,6 +42,7 @@ fn rem_euclid(x: f32, y: f32) -> f32 {
     }
 }
 
+#[allow(dead_code)]
 fn density(pos: Vec3, p: &GalaxyUniform) -> f32 {
     let r = (pos.x * pos.x + pos.z * pos.z).sqrt();
     let z = pos.y.abs();
@@ -114,6 +116,7 @@ fn halo_column(r: f32, p: &GalaxyUniform) -> f32 {
     PI * p.halo_radius * p.halo_central_density * (1.0 + x).powf(p.halo_slope + 1.0)
 }
 
+#[allow(dead_code)]
 fn disk_density(r: f32, z: f32, p: &GalaxyUniform) -> f32 {
     if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
         return 0.0;
@@ -124,6 +127,7 @@ fn disk_density(r: f32, z: f32, p: &GalaxyUniform) -> f32 {
     p.disk_central_density * radial * sech * sech
 }
 
+#[allow(dead_code)]
 fn arm_modulation(pos: Vec3, r: f32, p: &GalaxyUniform) -> f32 {
     if p.arm_count == 0 || p.arm_strength <= 0.0 {
         return 1.0;
@@ -145,6 +149,7 @@ fn arm_modulation(pos: Vec3, r: f32, p: &GalaxyUniform) -> f32 {
     1.0 + p.arm_strength * (-0.5 * arg * arg).exp()
 }
 
+#[allow(dead_code)]
 fn bulge_density(dist: f32, p: &GalaxyUniform) -> f32 {
     if p.bulge_radius <= 0.0 {
         return 0.0;
@@ -153,6 +158,7 @@ fn bulge_density(dist: f32, p: &GalaxyUniform) -> f32 {
     p.bulge_central_density * (1.0 + x * x).powf(-2.5)
 }
 
+#[allow(dead_code)]
 fn halo_density(dist: f32, p: &GalaxyUniform) -> f32 {
     if p.halo_radius <= 0.0 || dist < 1e-6 {
         return p.halo_central_density;
@@ -162,10 +168,10 @@ fn halo_density(dist: f32, p: &GalaxyUniform) -> f32 {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  Stars: per-pixel procedural star rendering
+//  Stars: hashing, IMF, and colour helpers
 // ═══════════════════════════════════════════════════════════
 
-/// PCG-style hash for deterministic per-pixel PRNG.
+/// PCG-style hash for deterministic world-space hashing.
 fn hash3(mut x: u32, y: u32, seed: u32) -> u32 {
     x = x.wrapping_mul(0xcc9e2d51).wrapping_add(y);
     x = x.rotate_left(15);
@@ -179,55 +185,16 @@ fn hash3(mut x: u32, y: u32, seed: u32) -> u32 {
     x
 }
 
-/// Fast LCG returning a float in [0, 1).
-fn randf(rng: &mut u32) -> f32 {
-    *rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-    // Use 24 bits for good precision.
-    (*rng >> 8) as f32 / 16777215.0
-}
-
-/// Poisson-draw the number of stars for this pixel.
-/// Standard Knuth algorithm; fine when λ is small (≪ 30).
-fn poisson(lambda: f32, rng: &mut u32) -> u32 {
-    if lambda <= 0.0 {
-        return 0;
-    }
-    let l = (-lambda).exp();
-    let mut k: u32 = 0;
-    let mut p: f32 = 1.0;
-    loop {
-        k += 1;
-        p *= randf(rng);
-        if p <= l {
-            break;
-        }
-    }
-    k - 1
-}
-
-/// Sample stellar mass from a Kroupa IMF (upper part:  m⁻²·³  for  0.5–100 M☉).
-fn sample_imf(rng: &mut u32) -> f32 {
-    let m_min: f32 = 0.5;
-    let m_max: f32 = 100.0;
-    let alpha: f32 = 2.3;
-    let u = randf(rng);
-    // Inverse CDF for power law  p(m) ∝ m^(-α):
-    let e = 1.0 - alpha;
-    let m_min_pow = m_min.powf(e);
-    let m_max_pow = m_max.powf(e);
-    (m_min_pow + u * (m_max_pow - m_min_pow)).powf(1.0 / e)
-}
-
 /// Mass–luminosity (main-sequence approximation in solar units).
+///
+/// L ∝ M³·⁵ for 0.5–2 M☉,  L ∝ M for massive stars.
+const L_BREAK: f32 = 11.313_708; // 2.0^3.5
+
 fn mass_to_lum(m: f32) -> f32 {
-    // L ∝ M³·⁵ for  0.5–2 M☉,  L ∝ M  for massive stars.
-    // Use a smooth-ish broken power law.
     if m < 2.0 {
         m.powf(3.5)
     } else {
-        //  L = L_break * (M / M_break)^1.0
-        let l_break: f32 = 2.0f32.powf(3.5);
-        l_break * (m / 2.0)
+        L_BREAK * (m / 2.0)
     }
 }
 
@@ -272,9 +239,148 @@ fn temperature_to_rgb(t_kelvin: f32) -> Vec3 {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  World-space deterministic star grid
+//
+//  Every 0.1-LY "star cell" gets a deterministic yes/no star
+//  decision and a deterministic Kroupa-IMF mass from its integer
+//  grid index.  The same world location always produces the
+//  same stars — fully zoom-invariant.
+//
+//  Performance: column density is read ONCE at pixel centre
+//  and reused for all cells — galaxy profiles vary on kLY
+//  scales, so 0.1-LY variation is negligible.
+//
+//  Stability: a FIXED-SIZE window centred on the pixel's
+//  centre cell is used instead of stride-subsampling.
+//  Window bounds shift only when the centre crosses a cell
+//  boundary, which is exactly the expected scrolling behaviour.
+// ═══════════════════════════════════════════════════════════
+
+/// Size of one star cell in light-years.
+const STAR_CELL_SIZE: f32 = 0.1;
+
+/// Precomputed 1.0 / STAR_CELL_SIZE for multiply instead of divide.
+const INV_STAR_CELL_SIZE: f32 = 10.0;
+
+/// Max star cells iterated per pixel (prevents GPU timeout
+/// at extreme zoom-out in sparse regions).
+
+/// Fixed window side length = √MAX_STAR_CELLS = 16.
+const WINDOW_SIDE: u32 = 16;
+
+/// World-coordinate offset that keeps cell indices >= 0.
+const STAR_OFFSET: f32 = 1_000_000.0;
+
+/// Map a world coordinate to a non-negative star-cell index.
+fn star_cell(w: f32) -> u32 {
+    ((w + STAR_OFFSET) * INV_STAR_CELL_SIZE) as u32
+}
+
+/// Smooth Hermite interpolation (same as GLSL smoothstep).
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Deterministic check: does this star cell contain at least one star?
+fn cell_has_star(cx: u32, cz: u32, star_prob: f32) -> bool {
+    let h = hash3(cx, cz, 77u32);
+    let r = (h >> 8) as f32 / 16777215.0;
+    r < star_prob
+}
+
+/// Deterministic IMF mass sample from cell coordinates.
+///
+/// Constants pre-computed for Kroupa IMF  α = 2.3, m ∈ [0.5, 100] M☉:
+///   e = 1 – α = −1.3
+///   m_min_pow = 0.5^(-1.3)  ≈ 2.462…
+///   m_max_pow = 100.0^(-1.3) ≈ 0.00251…
+///   1/e = 1 / −1.3      ≈ −0.7692…
+const IMF_M_MIN_POW: f32 = 2.462_288_8;
+const IMF_M_MAX_POW: f32 = 0.002_511_886_4;
+const IMF_INV_E: f32 = -0.769_230_8;
+
+fn sample_imf_from_cell(cx: u32, cz: u32) -> f32 {
+    let h = hash3(cx, cz, 123u32);
+    let u = (h >> 8) as f32 / 16777215.0;
+    (IMF_M_MIN_POW + u * (IMF_M_MAX_POW - IMF_M_MIN_POW)).powf(IMF_INV_E)
+}
+
+/// Deterministic star colour + luminosity for a cell.
+fn cell_star_light(cx: u32, cz: u32) -> Vec3 {
+    let mass = sample_imf_from_cell(cx, cz);
+    let lum = mass_to_lum(mass);
+    let temp = mass_to_temp(mass);
+    temperature_to_rgb(temp) * lum
+}
+
+/// Sample the star grid over a pixel's world-space footprint.
+/// Column density is pre-computed at pixel centre and assumed
+/// constant across the footprint — a < 0.1 % error for typical
+/// galaxy profiles.
+#[allow(clippy::manual_saturating_arithmetic)]
+fn sample_star_grid(wx: f32, wz: f32, pixel_w: f32, pixel_h: f32, col_dens: f32) -> Vec3 {
+    let half_w = pixel_w * 0.5;
+    let half_h = pixel_h * 0.5;
+
+    // Precompute the star-existence probability once per pixel.
+    // P(≥1 star in cell) = 1 − exp(−col_dens × cell_area).
+    let star_prob = if col_dens > 0.0 {
+        let lambda_cell = col_dens * STAR_CELL_SIZE * STAR_CELL_SIZE;
+        1.0 - (-lambda_cell).exp()
+    } else {
+        0.0
+    };
+
+    // How many star cells does the pixel footprint span?
+    let cells_x = ((pixel_w * INV_STAR_CELL_SIZE).ceil() as u32).max(1);
+    let cells_z = ((pixel_h * INV_STAR_CELL_SIZE).ceil() as u32).max(1);
+    let pixel_cells = cells_x * cells_z;
+
+    // Choose between full-footprint iteration (small pixels)
+    // and fixed-window subsampling (large pixels).
+    let min_cx: u32;
+    let max_cx: u32;
+    let min_cz: u32;
+    let max_cz: u32;
+    let weight: f32;
+
+    if cells_x <= WINDOW_SIDE && cells_z <= WINDOW_SIDE {
+        min_cx = star_cell(wx - half_w);
+        max_cx = star_cell(wx + half_w);
+        min_cz = star_cell(wz - half_h);
+        max_cz = star_cell(wz + half_h);
+        weight = 1.0;
+    } else {
+        let cx_center = star_cell(wx);
+        let cz_center = star_cell(wz);
+        let half = WINDOW_SIDE / 2;
+        min_cx = cx_center - half.min(cx_center);
+        max_cx = cx_center + half;
+        min_cz = cz_center - half.min(cz_center);
+        max_cz = cz_center + half;
+        let sampled = WINDOW_SIDE * WINDOW_SIDE;
+        weight = pixel_cells as f32 / sampled as f32;
+    }
+
+    let mut light = Vec3::new(0.0, 0.0, 0.0);
+    let mut cx = min_cx;
+    while cx <= max_cx {
+        let mut cz = min_cz;
+        while cz <= max_cz {
+            if cell_has_star(cx, cz, star_prob) {
+                light += cell_star_light(cx, cz) * weight;
+            }
+            cz += 1;
+        }
+        cx += 1;
+    }
+
+    light
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Unified scene render (single pass)
-//  Replaces the old three-pass pipeline (density → normalize →
-//  stars) with one compute shader that handles everything.
 // ═══════════════════════════════════════════════════════════
 
 /// Light-weighted mean luminosity per star from Kroupa IMF (L☉).
@@ -286,10 +392,7 @@ const MEAN_SPECTRAL_R: f32 = 0.55;
 const MEAN_SPECTRAL_G: f32 = 0.60;
 const MEAN_SPECTRAL_B: f32 = 0.72;
 
-/// Below this λ, render individual stars with Poisson sampling.
-const LAMBDA_INDIVIDUAL: f32 = 2.0;
-
-/// Above this λ, switch to analytic expected light.
+/// Above this λ, switch to pure analytic light (no individual stars).
 const LAMBDA_ANALYTIC: f32 = 20.0;
 
 #[spirv(compute(threads(8, 8, 1)))]
@@ -307,58 +410,32 @@ pub fn render_scene(
     let idx = (py * params.image_width + px) as usize;
 
     // ── world position ─────────────────────────────────
-    let wx = (px as f32 / params.image_width as f32 - 0.5) * params.extent + params.center_x;
-    let wz = -(py as f32 / params.image_height as f32 - 0.5) * params.extent + params.center_y;
+    let extent_x = params.extent;
+    let extent_y = params.extent * (params.image_height as f32 / params.image_width as f32);
+    let wx = (px as f32 / params.image_width as f32 - 0.5) * extent_x + params.center_x;
+    let wz = -(py as f32 / params.image_height as f32 - 0.5) * extent_y + params.center_y;
 
     // ── expected star count for this column ────────────
     let col_dens = column_density(wx, wz, params);
-    let pixel_area =
-        (params.extent / params.image_width as f32) * (params.extent / params.image_height as f32);
+    let pixel_w = extent_x / params.image_width as f32;
+    let pixel_h = extent_y / params.image_height as f32;
+    let pixel_area = pixel_w * pixel_h;
     let lambda = col_dens * pixel_area;
 
-    // ── seed RNG from world position (stars follow the galaxy) ─
-    let cell: f32 = 10.0; // 0.1 LY cells
-    let seed_offset: f32 = 1_000_000.0;
-    let qx = ((wx + seed_offset) * cell) as u32;
-    let qz = ((wz + seed_offset) * cell) as u32;
-    let mut rng = hash3(qx, qz, 42u32);
-
     // ── star light ─────────────────────────────────────
-    let rgb: Vec3;
+    let mean_color = Vec3::new(MEAN_SPECTRAL_R, MEAN_SPECTRAL_G, MEAN_SPECTRAL_B);
+    let analytic_rgb = mean_color * lambda * MEAN_IMF_LUM;
 
-    if lambda < LAMBDA_INDIVIDUAL {
-        // Individual Poisson-sampled stars.
-        let n = poisson(lambda, &mut rng);
-        if n == 0 {
-            rgba[idx] = 0xff_00_00_00;
-            return;
-        }
-        let mut acc = Vec3::new(0.0, 0.0, 0.0);
-        for _ in 0..n {
-            let mass = sample_imf(&mut rng);
-            let lum = mass_to_lum(mass);
-            let temp = mass_to_temp(mass);
-            acc += temperature_to_rgb(temp) * lum;
-        }
-        rgb = acc;
-    } else if lambda < LAMBDA_ANALYTIC {
-        // Blend individual → analytic.
-        let n = poisson(lambda, &mut rng);
-        let mut star_acc = Vec3::new(0.0, 0.0, 0.0);
-        for _ in 0..n {
-            let mass = sample_imf(&mut rng);
-            let lum = mass_to_lum(mass);
-            let temp = mass_to_temp(mass);
-            star_acc += temperature_to_rgb(temp) * lum;
-        }
-        let analytic =
-            Vec3::new(MEAN_SPECTRAL_R, MEAN_SPECTRAL_G, MEAN_SPECTRAL_B) * lambda * MEAN_IMF_LUM;
-        let t = (lambda - LAMBDA_INDIVIDUAL) / (LAMBDA_ANALYTIC - LAMBDA_INDIVIDUAL);
-        let t_s = t * t * (3.0 - 2.0 * t); // smoothstep
-        rgb = star_acc * (1.0 - t_s) + analytic * t_s;
+    let rgb: Vec3;
+    if lambda < LAMBDA_ANALYTIC {
+        // World-space deterministic star grid (zoom-invariant).
+        let star_rgb = sample_star_grid(wx, wz, pixel_w, pixel_h, col_dens);
+        // smoothstep blend: individual stars at low λ, analytic at high λ
+        let t = smoothstep(0.0, LAMBDA_ANALYTIC, lambda);
+        rgb = star_rgb * (1.0 - t) + analytic_rgb * t;
     } else {
-        // Analytic expected light (acts as a density field).
-        rgb = Vec3::new(MEAN_SPECTRAL_R, MEAN_SPECTRAL_G, MEAN_SPECTRAL_B) * lambda * MEAN_IMF_LUM;
+        // Pure analytic light (acts as a smooth density field).
+        rgb = analytic_rgb;
     }
 
     // ── tone-map (luminance-based, preserves chromaticity) ───
