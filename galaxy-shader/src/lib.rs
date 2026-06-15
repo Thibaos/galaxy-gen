@@ -383,18 +383,6 @@ fn sample_star_grid(wx: f32, wz: f32, pixel_w: f32, pixel_h: f32, col_dens: f32)
 //  Unified scene render (single pass)
 // ═══════════════════════════════════════════════════════════
 
-/// Light-weighted mean luminosity per star from Kroupa IMF (L☉).
-const MEAN_IMF_LUM: f32 = 6.64;
-
-/// Light-weighted mean spectral colour (linear RGB).
-/// Slightly blue-tinted — massive stars dominate the integrated light.
-const MEAN_SPECTRAL_R: f32 = 0.55;
-const MEAN_SPECTRAL_G: f32 = 0.60;
-const MEAN_SPECTRAL_B: f32 = 0.72;
-
-/// Above this λ, switch to pure analytic light (no individual stars).
-const LAMBDA_ANALYTIC: f32 = 20.0;
-
 #[spirv(compute(threads(8, 8, 1)))]
 pub fn render_scene(
     #[spirv(global_invocation_id)] id: UVec3,
@@ -415,28 +403,12 @@ pub fn render_scene(
     let wx = (px as f32 / params.image_width as f32 - 0.5) * extent_x + params.center_x;
     let wz = -(py as f32 / params.image_height as f32 - 0.5) * extent_y + params.center_y;
 
-    // ── expected star count for this column ────────────
+    // ── star light ─────────────────────────────────────
+    // World-space deterministic star grid at all densities.
     let col_dens = column_density(wx, wz, params);
     let pixel_w = extent_x / params.image_width as f32;
     let pixel_h = extent_y / params.image_height as f32;
-    let pixel_area = pixel_w * pixel_h;
-    let lambda = col_dens * pixel_area;
-
-    // ── star light ─────────────────────────────────────
-    let mean_color = Vec3::new(MEAN_SPECTRAL_R, MEAN_SPECTRAL_G, MEAN_SPECTRAL_B);
-    let analytic_rgb = mean_color * lambda * MEAN_IMF_LUM;
-
-    let rgb: Vec3;
-    if lambda < LAMBDA_ANALYTIC {
-        // World-space deterministic star grid (zoom-invariant).
-        let star_rgb = sample_star_grid(wx, wz, pixel_w, pixel_h, col_dens);
-        // smoothstep blend: individual stars at low λ, analytic at high λ
-        let t = smoothstep(0.0, LAMBDA_ANALYTIC, lambda);
-        rgb = star_rgb * (1.0 - t) + analytic_rgb * t;
-    } else {
-        // Pure analytic light (acts as a smooth density field).
-        rgb = analytic_rgb;
-    }
+    let rgb = sample_star_grid(wx, wz, pixel_w, pixel_h, col_dens);
 
     // ── tone-map (luminance-based, preserves chromaticity) ───
     // Applying ln() per-channel destroys colour ratios.
