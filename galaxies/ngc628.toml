@@ -1,0 +1,117 @@
+# NGC 628 (M74, Phantom Galaxy) — Reference Data
+# =================================================
+# Compiled from published photometric surveys and literature.
+# Used to calibrate the galaxy-gen `GalaxyParams::ngc628()` preset.
+#
+# Last updated: 2026-06-15
+
+[identification]
+name = "NGC 628"
+common_name = "M74 (Phantom Galaxy)"
+morphology = "SA(s)c"
+# Grand-design face-on spiral, unbarred (or very weak bar).
+
+[distance]
+# Sources disagree: 7.2, 8.6, 9.3, 9.7 Mpc have all been cited.
+# We adopt 9.7 Mpc (PHANGS / Leroy et al. 2021), consistent with
+# the most recent Cepheid + TRGB measurements.
+mpc = 9.7
+# Conversion: 1 arcsec at 9.7 Mpc = 47.0 pc = 153.4 ly
+ly_per_arcsec = 153.38
+pc_per_arcsec = 47.03
+
+[structure]
+inclination_deg = 6.5   # Kamphuis & Briggs 1992 — nearly face-on
+position_angle_deg = 25 # Major axis PA
+r25_arcmin = 5.23       # Optical radius
+
+# ── Photometric decomposition (S4G Pipeline 4, Salo et al. 2015) ──
+# Model: bulge (Sérsic) + disk (exponential), quality flag Q=5.
+# 3.6 μm Spitzer/IRAC1 image.
+
+[photometry_s4g]
+bulge_fraction = 0.065    # 6.5 % of total flux
+bulge_sersic_n = 1.242    # nearly exponential pseudo-bulge
+bulge_re_arcsec = 12.2    # effective (half-light) radius
+bulge_re_ly = 1871        # 12.2" × 153.38 ly/"
+bulge_axial_ratio = 0.915
+disk_fraction = 0.935     # 93.5 %
+disk_hr_arcsec = 69.3     # exponential scale length
+disk_hr_ly = 10630        # 69.3" × 153.38 ly/" = 3.26 kpc
+disk_hr_pc = 3260
+disk_axial_ratio = 0.858
+disk_mu0 = 20.318         # central surface brightness (mag/arcsec², de-projected)
+
+# ── Physical mass estimates ──
+
+[mass]
+# Total stellar mass from PHANGS (Leroy et al. 2021).
+total_stellar_msun = 2.2e10 # ±0.56 × 10¹⁰
+# Bulge stellar mass: 6.5 % of total → 1.43 × 10⁹ M☉
+bulge_msun = 1.43e9
+# Disk stellar mass: 93.5 % of total → 2.06 × 10¹⁰ M☉
+disk_msun = 2.06e10
+
+# ── Spiral structure ──
+
+[spiral_arms]
+# NGC 628 is described as "multiple-armed" with a grand-design pattern.
+# Studies find 2 dominant arms plus weaker interarm features.
+# We model with 4 arms (2 dominant + 2 weaker is approximated by the
+# arm_strength modulation).
+dominant_arms = 2
+model_arms = 4
+# Pitch angle not precisely measured in a single consensus value.
+# Estimates range from ~12° (tight) to ~35° (open).
+# We adopt 15° ≈ 0.262 rad as a visually reasonable value.
+pitch_angle_deg = 15.0
+pitch_angle_rad = 0.262
+
+# ── Scale height (indirect) ──
+
+[scale_height]
+# Direct measurement impossible for face-on galaxies.
+# Outer-disk Hα knots suggest hz ~ 400-700 pc (Herrmann+2009).
+# Thin-disk estimate: ~300 pc from typical Sc relation hz/hr ~ 0.09.
+# We adopt a conservative mid-range value.
+hz_pc = 350
+hz_ly = 1141
+
+# ── Derived shader parameters ──
+
+[shader_params]
+# disk_scale_length = 10,630 ly (from S4G)
+# disk_scale_height = 1,140 ly (estimated, see [scale_height])
+# disk_central_density: n0 = Σ0 / (2hz × ⟨m⟩)
+#   Σ0 = M_disk / (2π hr²) = 2.06e10 / (2π × 10630²) ≈ 29.0 M☉/ly²
+#   ⟨m⟩ ≈ 7.4 M☉ (full Kroupa IMF 0.08-100 M☉)
+#   n0 ≈ 29.0 / (2 × 1140 × 7.4) ≈ 0.00172 stars/ly³
+disk_central_density = 0.00172
+
+# arm_count = 4
+# arm_pitch = 0.262 rad
+# arm_concentration = 5.0 (default, similar to Milky Way)
+# arm_strength = 1.0 (2× arm/interarm contrast, standard)
+
+# bulge_radius = 1,871 ly (Plummer a = effective radius, from S4G)
+# bulge_central_density: ρ0_bulge = 3M_bulge / (4π a³) / ⟨m⟩
+#   = 3 × 1.43e9 / (4π × 1871³) / 7.4
+#   ≈ 0.00704 stars/ly³
+bulge_central_density = 0.00704
+
+# halo: poorly constrained for external galaxies.
+# Scaled roughly from Milky Way halo-to-disk column ratio (~2% at solar circle).
+# Using Milky-Way-like values as placeholders.
+halo_radius_ly = 75000
+halo_central_density = 6.9e-8
+halo_slope = -3.5
+
+# ── Sources ──
+
+[sources]
+s4g = "Salo et al. 2015, ApJS 219, 4 — S4G Pipeline 4 multi-component decompositions"
+stellar_mass = "Leroy et al. 2021, ApJS 257, 43 — PHANGS stellar mass maps"
+kinematics = "Kamphuis & Briggs 1992, A&A 253, 335 — HI velocity field"
+outer_disk = "Herrmann et al. 2009, ApJ 705, 1686 — PN and Hα kinematics"
+inclination = "Kamphuis & Briggs 1992 — i = 6.5°"
+morphology = "Buta et al. 2014 — mid-IR classification"

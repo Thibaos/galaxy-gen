@@ -30,6 +30,32 @@ cargo run --release
 | Mouse drag          | Pan                         |
 | Mouse wheel         | Zoom in / out               |
 
+## Galaxy Presets
+
+Galaxy parameters are calibrated against published photometric surveys.
+To switch the rendered galaxy, change the constructor call near the top of
+`main()` in `src/main.rs`.
+
+| Preset | Galaxy | Type | Key reference |
+|--------|--------|------|---------------|
+| `GalaxyParams::milky_way()` | Milky Way | SBbc | Binney & Tremaine (2008) |
+| `GalaxyParams::ngc628()` | NGC 628 (M74 / Phantom Galaxy) | SA(s)c | S4G (Salo et al. 2015), PHANGS (Leroy et al. 2021) |
+
+Reference data — including original measurements, derived shader parameters,
+conversion formulas, and academic sources — lives in `galaxies/*.toml`.
+No web searching required when tuning or adding new galaxy targets.
+
+### Calibration confidence
+
+| Parameter | Milky Way | NGC 628 |
+|-----------|-----------|---------|
+| Disk scale length | Measured (local) | Measured (S4G) |
+| Disk scale height | Measured (local) | Estimated (hz/hr ratio) |
+| Bulge Re | Measured | Measured (S4G) |
+| Arm pitch | Measured (cosmic microwave) | Estimated (images) |
+| Stellar mass | Measured (local) | Measured (PHANGS) |
+| Halo | Measured (local) | Scaled from MW |
+
 ## Development
 
 ```bash
@@ -44,8 +70,9 @@ cargo run --release # Run optimized
 
 - `src/main.rs` — window, input handling, rendering loop
 - `src/gpu.rs` — GPU compute pipeline, uniform buffer, dispatch
-- `src/galaxy.rs` — galaxy parameter definitions
+- `src/galaxy.rs` — galaxy parameter definitions and presets
 - `src/display.wgsl` — fullscreen quad vertex/fragment shader
 - `src/lib.rs` — crate root, re-exports
 - `galaxy-shader/` — SPIR-V compute shader (density model, stars, tone mapping)
+- `galaxies/` — reference data for real-galaxy targets (TOML, sources included)
 - `build.rs` — compiles galaxy-shader to SPIR-V via spirv-builder

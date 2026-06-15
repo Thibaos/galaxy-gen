@@ -265,6 +265,35 @@ mod tests {
     }
 
     #[test]
+    fn from_params_preserves_values_ngc628() {
+        let params = GalaxyParams::ngc628();
+        let uniform =
+            GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
+
+        assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
+        assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
+        assert_eq!(
+            uniform.disk_central_density,
+            params.disk_central_density as f32
+        );
+        assert_eq!(uniform.arm_count, params.arm_count);
+        assert_eq!(uniform.arm_pitch, params.arm_pitch as f32);
+        assert_eq!(uniform.arm_concentration, params.arm_concentration as f32);
+        assert_eq!(uniform.arm_strength, params.arm_strength as f32);
+        assert_eq!(uniform.bulge_radius, params.bulge_radius as f32);
+        assert_eq!(
+            uniform.bulge_central_density,
+            params.bulge_central_density as f32
+        );
+        assert_eq!(uniform.halo_radius, params.halo_radius as f32);
+        assert_eq!(
+            uniform.halo_central_density,
+            params.halo_central_density as f32
+        );
+        assert_eq!(uniform.halo_slope, params.halo_slope as f32);
+    }
+
+    #[test]
     fn from_params_with_nonzero_center() {
         let params = GalaxyParams::milky_way();
         let uniform =
@@ -372,6 +401,80 @@ mod tests {
         // Halo should decrease with radius
         assert!(values[0] >= values[1], "halo should decrease with radius");
         assert!(values[1] > values[3], "halo should continue decreasing");
+    }
+
+    // ── NGC 628 column profile checks ───────────────────
+
+    #[test]
+    fn ngc628_disk_column_profile() {
+        let p = GalaxyParams::ngc628();
+        let d0 = host_disk_column(0.0, &p);
+        let d1 = host_disk_column(p.disk_scale_length, &p);
+        let d2 = host_disk_column(3.0 * p.disk_scale_length, &p);
+        assert!(d0 > 0.0, "ngc628 disk column at r=0 should be positive");
+        assert!(d1 < d0, "ngc628 disk should decrease with radius");
+        assert!(d2 < d1, "ngc628 disk should continue decreasing");
+        // Exponential drop: d1/d0 ≈ 1/e
+        let ratio = d1 / d0;
+        assert!(
+            (ratio - 1.0 / std::f64::consts::E).abs() < 0.01,
+            "ngc628 d(scale_length)/d(0) should be ~1/e, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn ngc628_bulge_is_compact_relative_to_disk() {
+        let p = GalaxyParams::ngc628();
+        // The bulge is compact (a = 1,871 ly) vs. the extended disk
+        // (hr = 10,630 ly).  Even though the bulge is only 6.5 % of
+        // total stellar mass, its central surface density exceeds the
+        // disk's.  This is correct for a Plummer bulge.
+        // Σ_bulge(0) / Σ_disk(0) ≈ (M_b/M_d) × 2(hr/a)² ≈ 4.5.
+        let bulge_c0 = host_bulge_column(0.0, &p);
+        let disk_c0 = host_disk_column(0.0, &p);
+        let ratio = bulge_c0 / disk_c0;
+        assert!(
+            ratio > 2.0,
+            "ngc628 bulge/disk column ratio {ratio:.3} should be > 2"
+        );
+        assert!(
+            ratio < 10.0,
+            "ngc628 bulge/disk column ratio {ratio:.3} should be < 10"
+        );
+        // But at the disk scale length, the disk should dominate.
+        let bulge_c1 = host_bulge_column(p.disk_scale_length, &p);
+        let disk_c1 = host_disk_column(p.disk_scale_length, &p);
+        assert!(
+            disk_c1 > bulge_c1,
+            "ngc628 at r=hr: disk column {disk_c1:.3} should exceed bulge {bulge_c1:.3}"
+        );
+    }
+
+    #[test]
+    fn ngc628_bulge_column_plummer_drop() {
+        let p = GalaxyParams::ngc628();
+        let d0 = host_bulge_column(0.0, &p);
+        let d_a = host_bulge_column(p.bulge_radius, &p);
+        assert!(d0 > 0.0, "ngc628 bulge column at center should be positive");
+        // Plummer: Σ(R) ∝ (1 + R²/a²)^(-2). At R=a, factor is 1/4.
+        let ratio = d_a / d0;
+        assert!(
+            (ratio - 0.25).abs() < 0.01,
+            "ngc628 bulge at R=a should be ~1/4 of central, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn ngc628_disk_scale_length_matches_s4g() {
+        // The S4G disk scale length is 69.3 arcsec at 9.7 Mpc.
+        // 1 arcsec = 153.38 ly, so hr = 69.3 × 153.38 = 10,629 ly.
+        let p = GalaxyParams::ngc628();
+        let expected = 10_630.0;
+        assert!(
+            (p.disk_scale_length - expected).abs() < 10.0,
+            "ngc628 disk_scale_length {} differs from expected {expected}",
+            p.disk_scale_length
+        );
     }
 
     #[test]
