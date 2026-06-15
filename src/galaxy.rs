@@ -40,17 +40,17 @@ impl GalaxyParams {
             disk_scale_height: 800.0,
             disk_central_density: 0.1,
 
-            arm_count: 4,
-            arm_pitch: 0.2,
+            arm_count: 6,
+            arm_pitch: 0.6,
             arm_concentration: 4.0,
             arm_strength: 1.5,
 
-            bulge_radius: 2_000.0,
+            bulge_radius: 1_000.0,
             bulge_central_density: 2.0,
 
             halo_radius: 15_000.0,
             halo_central_density: 1e-5,
-            halo_slope: -3.0,
+            halo_slope: -6.0,
         }
     }
 }
