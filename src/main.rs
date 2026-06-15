@@ -60,6 +60,7 @@ struct App {
 
     // ── compute pipeline (cached) ────────
     gpu_compute: Option<gpu::GpuCompute>,
+    uniform_buffer: Option<wgpu::Buffer>,
     rgba_buffer: Option<wgpu::Buffer>,
     rgba_buf_w: u32,
     rgba_buf_h: u32,
@@ -94,6 +95,7 @@ impl App {
             exposure: DEFAULT_EXPOSURE,
             contrast: DEFAULT_CONTRAST,
             gpu_compute: None,
+            uniform_buffer: None,
             rgba_buffer: None,
             rgba_buf_w: 0,
             rgba_buf_h: 0,
@@ -338,11 +340,15 @@ impl App {
         // ── re-render galaxy (all on GPU) ────────────
         if self.needs_render {
             let rgba_buf = self.rgba_buffer.as_ref().unwrap();
-            gpu::compute_galaxy(
-                device,
-                queue,
-                gpu_compute,
-                rgba_buf,
+            let uniform_buf = self.uniform_buffer.get_or_insert_with(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("uniforms"),
+                    size: std::mem::size_of::<gpu::GalaxyUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let uniform_data = gpu::GalaxyUniform::from_params(
                 &self.params,
                 self.render_w,
                 self.render_h,
@@ -351,6 +357,17 @@ impl App {
                 self.center_y,
                 self.exposure,
                 self.contrast,
+            );
+            queue.write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniform_data));
+
+            gpu::compute_galaxy(
+                device,
+                queue,
+                gpu_compute,
+                rgba_buf,
+                uniform_buf,
+                self.render_w,
+                self.render_h,
                 texture,
             );
             self.needs_render = false;

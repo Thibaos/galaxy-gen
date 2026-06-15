@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
-use wgpu::util::DeviceExt;
 
 use crate::galaxy::GalaxyParams;
 
@@ -104,7 +103,7 @@ pub struct GalaxyUniform {
 }
 
 impl GalaxyUniform {
-    fn from_params(
+    pub fn from_params(
         params: &GalaxyParams,
         image_w: u32,
         image_h: u32,
@@ -148,14 +147,9 @@ pub fn compute_galaxy(
     queue: &wgpu::Queue,
     compute: &GpuCompute,
     rgba_buffer: &wgpu::Buffer,
-    params: &GalaxyParams,
+    uniform_buffer: &wgpu::Buffer,
     image_w: u32,
     image_h: u32,
-    galaxy_extent_ly: f64,
-    center_x_ly: f64,
-    center_y_ly: f64,
-    exposure: f32,
-    contrast: f32,
     target_texture: &wgpu::Texture,
 ) {
     assert!(
@@ -165,23 +159,7 @@ pub fn compute_galaxy(
 
     let total = Instant::now();
 
-    // ── uniforms ─────────────────────────────────────────────
-
-    let uniform_data = GalaxyUniform::from_params(
-        params,
-        image_w,
-        image_h,
-        galaxy_extent_ly,
-        center_x_ly,
-        center_y_ly,
-        exposure,
-        contrast,
-    );
-    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("uniforms"),
-        contents: bytemuck::bytes_of(&uniform_data),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
+    // ── uniforms (pre-written by caller) ────────────────────
 
     let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene"),
@@ -202,11 +180,6 @@ pub fn compute_galaxy(
 
     let thread_group_x = image_w.div_ceil(8);
     let thread_group_y = image_h.div_ceil(8);
-
-    println!(
-        "GPU render {image_w}×{image_h} ±{:.0} kly  exp={exposure:.3} con={contrast:.4}",
-        galaxy_extent_ly / 1_000.0 / 2.0,
-    );
 
     let mut encoder =
         device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -247,7 +220,7 @@ pub fn compute_galaxy(
 
     queue.submit(Some(encoder.finish()));
 
-    println!("  total: {:.2?}", total.elapsed());
+    println!("frame time: {:.2?}", total.elapsed());
 }
 
 #[cfg(test)]
