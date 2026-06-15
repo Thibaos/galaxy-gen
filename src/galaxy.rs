@@ -5,7 +5,9 @@ pub struct GalaxyParams {
     pub disk_scale_length: f64,
     /// Scale height (vertical sech²).
     pub disk_scale_height: f64,
-    /// Central surface density of the disk (stars / ly³ at r=0, z=0).
+    /// Midplane stellar number density at the galactic centre (stars / ly³).
+    /// Derived from Milky Way central mass surface density (~650 M☉/pc²)
+    /// divided by the full Kroupa IMF mean stellar mass (≈7.4 M☉).
     pub disk_central_density: f64,
 
     // ── spiral arms ───────────────────────────
@@ -16,18 +18,23 @@ pub struct GalaxyParams {
     /// How concentrated each arm is azimuthally (larger = tighter).
     pub arm_concentration: f64,
     /// Relative density enhancement of the arms over the smooth disk.
+    /// Physical value: spiral arm over-density is ~2× (arm_strength = 1).
     pub arm_strength: f64,
 
     // ── central bulge ─────────────────────────
     /// Scale radius of the bulge (Plummer / spherical).
     pub bulge_radius: f64,
     /// Central density of the bulge (stars / ly³).
+    /// From Milky Way bulge mass (1.84×10¹⁰ M☉) within Plummer
+    /// radius (2500 ly) converted to number density via full Kroupa IMF.
     pub bulge_central_density: f64,
 
     // ── stellar halo ──────────────────────────
     /// Halo core radius.
     pub halo_radius: f64,
-    /// Halo central density.
+    /// Halo central density (stars / ly³).
+    /// From stellar halo mass (≈10⁹ M☉) within the 23 kpc break radius,
+    /// giving ≈2 % of the disk column at the solar circle (full IMF).
     pub halo_central_density: f64,
     /// Halo outer power-law slope (typically ≈ -3 to -3.5).
     pub halo_slope: f64,
@@ -36,21 +43,32 @@ pub struct GalaxyParams {
 impl GalaxyParams {
     pub fn milky_way() -> Self {
         Self {
-            disk_scale_length: 7_500.0,
-            disk_scale_height: 800.0,
-            disk_central_density: 1e-8,
+            disk_scale_length: 8_500.0,
+            disk_scale_height: 950.0,
+            // Physical: central stellar number density from mass surface
+            // density Σ₀ ≈ 650 M☉ pc⁻², mean mass ⟨m⟩ ≈ 7.4 M☉ (full
+            // Kroupa IMF 0.08–100 M☉), H = 950 ly.
+            // n0 = Σ₀ / (⟨m⟩ · 2H) = 61.5 / (7.4 · 1900) ≈ 0.00437.
+            disk_central_density: 4.37e-3,
 
-            arm_count: 5,
-            arm_pitch: 0.55,
+            arm_count: 4,
+            arm_pitch: 0.22,
             arm_concentration: 5.0,
-            arm_strength: 1e6,
+            // Physical: spiral arms enhance surface density by ≈2×.
+            arm_strength: 1.0,
 
-            bulge_radius: 2_000.0,
-            bulge_central_density: 0.1,
+            bulge_radius: 2_500.0,
+            // Physical: central bulge number density from Plummer model
+            // with M ≈ 1.84 × 10¹⁰ M☉, a = 2500 ly.
+            // ρ₀ = 3M/(4πa³) / ⟨m⟩ ≈ 0.282 / 7.4 ≈ 0.0381.
+            bulge_central_density: 0.0381,
 
-            halo_radius: 15_000.0,
-            halo_central_density: 1e-6,
-            halo_slope: -12.0,
+            halo_radius: 75_000.0,
+            // Physical: halo number density calibrated so the halo column
+            // at the solar circle (8 kpc) is ≈2 % of the disk column,
+            // consistent with stellar halo mass fraction (full IMF).
+            halo_central_density: 6.9e-8,
+            halo_slope: -3.5,
         }
     }
 }

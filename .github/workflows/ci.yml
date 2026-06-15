@@ -18,7 +18,7 @@ jobs:
 
       - name: Install Rust nightly
         run: |
-          rustup toolchain install nightly-2026-04-11 --profile minimal --component rust-src rustc-dev llvm-tools
+          rustup toolchain install nightly-2026-04-11 --profile minimal --component rust-src llvm-tools
           rustup override set nightly-2026-04-11
 
       - name: Cache cargo registry

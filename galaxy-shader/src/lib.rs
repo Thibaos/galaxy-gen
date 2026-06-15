@@ -291,19 +291,38 @@ fn cell_has_star(cx: u32, cz: u32, star_prob: f32) -> bool {
 
 /// Deterministic IMF mass sample from cell coordinates.
 ///
-/// Constants pre-computed for Kroupa IMF  α = 2.3, m ∈ [0.5, 100] M☉:
-///   e = 1 – α = −1.3
-///   m_min_pow = 0.5^(-1.3)  ≈ 2.462…
-///   m_max_pow = 100.0^(-1.3) ≈ 0.00251…
-///   1/e = 1 / −1.3      ≈ −0.7692…
-const IMF_M_MIN_POW: f32 = 2.462_288_8;
-const IMF_M_MAX_POW: f32 = 0.002_511_886_4;
-const IMF_INV_E: f32 = -0.769_230_8;
+/// Full Kroupa (2001) IMF, two segments:
+///   Segment 1:  α=1.3,  m ∈ [0.08, 0.5]  M☉  (low-mass dwarfs, 61.38 % of stars)
+///   Segment 2:  α=2.3,  m ∈ [0.5,  100]  M☉  (massive stars)
+///
+/// Inverse-CDF constants are pre-computed so the shader avoids
+/// transcendental calls at sample time.
+
+// ── Segment 1:  α=1.3,  e=−0.3 ──
+const IMF1_M_MIN_POW: f32 = 2.133_391_9; // 0.08^(−0.3)
+const IMF1_RANGE: f32 = -0.902_161_4; // 0.5^(−0.3) − 0.08^(−0.3)
+const IMF1_INV_E: f32 = -3.333_333_3; // 1/(−0.3)
+
+// ── Segment 2:  α=2.3,  e=−1.3 ──
+const IMF2_M_MIN_POW: f32 = 2.462_288_8; // 0.5^(−1.3)
+const IMF2_RANGE: f32 = -2.459_776_8; // 100^(−1.3) − 0.5^(−1.3)
+const IMF2_INV_E: f32 = -0.769_230_8; // 1/(−1.3)
+
+/// Random fraction of stars belonging to segment 1, as a u32 threshold.
+const IMF_SEG_THRESH: u32 = 2_636_411_560;
 
 fn sample_imf_from_cell(cx: u32, cz: u32) -> f32 {
     let h = hash3(cx, cz, 123u32);
+    let seg = h;
     let u = (h >> 8) as f32 / 16777215.0;
-    (IMF_M_MIN_POW + u * (IMF_M_MAX_POW - IMF_M_MIN_POW)).powf(IMF_INV_E)
+
+    if seg < IMF_SEG_THRESH {
+        // Segment 1: 0.08 – 0.5 M☉  (low-mass dwarfs)
+        (IMF1_M_MIN_POW + IMF1_RANGE * u).powf(IMF1_INV_E)
+    } else {
+        // Segment 2: 0.5 – 100 M☉ (massive stars)
+        (IMF2_M_MIN_POW + IMF2_RANGE * u).powf(IMF2_INV_E)
+    }
 }
 
 /// Deterministic star colour + luminosity for a cell.
@@ -320,17 +339,20 @@ fn cell_star_light(cx: u32, cz: u32) -> Vec3 {
 /// galaxy profiles.
 #[allow(clippy::manual_saturating_arithmetic)]
 fn sample_star_grid(wx: f32, wz: f32, pixel_w: f32, pixel_h: f32, col_dens: f32) -> Vec3 {
+    // Suppress deep-space speckles: when stellar density is too low
+    // for meaningful sampling, return zero.
+    const MIN_COL_DENS: f32 = 0.01;
+    if col_dens < MIN_COL_DENS {
+        return Vec3::new(0.0, 0.0, 0.0);
+    }
+
     let half_w = pixel_w * 0.5;
     let half_h = pixel_h * 0.5;
 
     // Precompute the star-existence probability once per pixel.
     // P(≥1 star in cell) = 1 − exp(−col_dens × cell_area).
-    let star_prob = if col_dens > 0.0 {
-        let lambda_cell = col_dens * STAR_CELL_SIZE * STAR_CELL_SIZE;
-        1.0 - (-lambda_cell).exp()
-    } else {
-        0.0
-    };
+    let lambda_cell = col_dens * STAR_CELL_SIZE * STAR_CELL_SIZE;
+    let star_prob = 1.0 - (-lambda_cell).exp();
 
     // How many star cells does the pixel footprint span?
     let cells_x = ((pixel_w * INV_STAR_CELL_SIZE).ceil() as u32).max(1);
@@ -405,10 +427,10 @@ pub fn render_scene(
     let wz = -(py as f32 / params.image_height as f32 - 0.5) * extent_y + params.center_y;
 
     // ── star light ─────────────────────────────────────
-    // World-space deterministic star grid at all densities.
     let col_dens = column_density(wx, wz, params);
     let pixel_w = extent_x / params.image_width as f32;
     let pixel_h = extent_y / params.image_height as f32;
+
     let rgb = sample_star_grid(wx, wz, pixel_w, pixel_h, col_dens);
 
     // ── tone-map (luminance-based, preserves chromaticity) ───

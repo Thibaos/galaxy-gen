@@ -15,7 +15,7 @@ const ZOOM_SPEED: f64 = 1.1;
 const MIN_EXTENT_LY: f64 = 10.0;
 const MAX_EXTENT_LY: f64 = 2_000_000.0;
 
-const DEFAULT_EXPOSURE: f32 = 0.60;
+const DEFAULT_EXPOSURE: f32 = 0.25;
 const DEFAULT_CONTRAST: f32 = 0.04;
 const EXPOSURE_STEP: f32 = 0.02;
 const CONTRAST_STEP: f32 = 0.002;
@@ -68,6 +68,7 @@ struct App {
     // ── mouse ─────────────────────────────
     dragging: bool,
     last_mouse: (f64, f64),
+    saved_startup_image: bool,
 }
 
 impl App {
@@ -101,6 +102,7 @@ impl App {
             rgba_buf_h: 0,
             dragging: false,
             last_mouse: (0.0, 0.0),
+            saved_startup_image: false,
         }
     }
 }
@@ -314,8 +316,7 @@ impl App {
             let device = self.device.as_ref().unwrap();
             let padded_w = self.render_w.div_ceil(64) * 64;
             let pixel_count = (padded_w * self.render_h) as usize;
-            let u32_byte_size =
-                (pixel_count * std::mem::size_of::<u32>()) as wgpu::BufferAddress;
+            let u32_byte_size = (pixel_count * std::mem::size_of::<u32>()) as wgpu::BufferAddress;
             self.rgba_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("rgba"),
                 size: u32_byte_size,
@@ -415,6 +416,67 @@ impl App {
         }
         queue.submit(Some(encoder.finish()));
         frame.present();
+
+        if !self.saved_startup_image {
+            self.save_snapshot(device, queue);
+            self.saved_startup_image = true;
+        }
+    }
+
+    fn save_snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let render_w = self.render_w;
+        let render_h = self.render_h;
+        let padded_w = render_w.div_ceil(64) * 64;
+        let buf_size = (padded_w as u64) * (render_h as u64) * 4;
+
+        let rgba_buf = match self.rgba_buffer.as_ref() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("staging"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("snapshot-copy"),
+        });
+        encoder.copy_buffer_to_buffer(rgba_buf, 0, &staging, 0, buf_size);
+        let idx = queue.submit(Some(encoder.finish()));
+
+        device.poll(wgpu::Maintain::WaitForSubmissionIndex(idx));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device.poll(wgpu::Maintain::Wait);
+
+        if let Ok(Ok(())) = rx.recv() {
+            let data = slice.get_mapped_range();
+            let bytes: &[u8] = &data;
+
+            let row_bytes = (render_w as usize) * 4;
+            let padded_row_bytes = (padded_w as usize) * 4;
+            let mut flat = Vec::with_capacity((render_w * render_h) as usize * 4);
+            for y in 0..render_h {
+                let offset = (y as usize) * padded_row_bytes;
+                flat.extend_from_slice(&bytes[offset..offset + row_bytes]);
+            }
+            drop(data);
+            staging.unmap();
+
+            if let Some(img) = image::RgbaImage::from_raw(render_w, render_h, flat) {
+                match img.save("galaxy.png") {
+                    Ok(_) => println!("Saved galaxy.png ({render_w}×{render_h})"),
+                    Err(e) => eprintln!("Failed to save galaxy.png: {e}"),
+                }
+            }
+        }
     }
 }
 

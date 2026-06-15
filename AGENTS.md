@@ -24,6 +24,7 @@ Single binary, no server, no network, no database.
 - Shader source lives in `galaxy-shader/src/lib.rs` (spirv-std, `#[spirv(compute(threads(8,8,1)))]`)
 - Host–shader struct correspondence: `src/gpu.rs` and `galaxy-shader/src/lib.rs` must keep `GalaxyUniform` in sync
 - Tests live in `#[cfg(test)] mod tests` at the bottom of each source file
+- Avoid using the `cargo clean` command, unless absolutely necessary
 
 ## Gotchas
 
