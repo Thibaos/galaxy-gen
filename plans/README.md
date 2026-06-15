@@ -8,12 +8,12 @@ honor its STOP conditions, and update your row when done.
 
 | Plan | Title                                                | Priority | Effort | Depends on | Status |
 |------|------------------------------------------------------|----------|--------|------------|--------|
-| 001  | Cache GPU pipeline and shader resources across frames | P1       | S      | —          | DONE   |
-| 002  | Add characterization tests for math-heavy code       | P1       | M      | 001        | DONE   |
-| 003  | Establish README, AGENTS.md, CI, and lint config      | P1       | S      | —          | DONE   |
-| 004  | Remove dead shader entry points                       | P2       | S      | —          | DONE   |
-| 005  | Add compile-time guard against host–shader struct mismatch | P2  | S      | —          | DONE   |
-| 006  | Remove unused `image` dependency                      | P2       | S      | —          | DONE   |
+| 001  | Cache GPU pipeline and shader resources across frames | P1       | S      | —          | DONE ✓ (2026-06-15) |
+| 002  | Add characterization tests for math-heavy code       | P1       | M      | 001        | DONE ✓ (2026-06-15) |
+| 003  | Establish README, AGENTS.md, CI, and lint config      | P1       | S      | —          | DONE ✓ (2026-06-15) |
+| 004  | Remove dead shader entry points                       | P2       | S      | —          | DONE ✓ (2026-06-15) |
+| 005  | Add compile-time guard against host–shader struct mismatch | P2  | S      | —          | DONE ✓ (2026-06-15) |
+| 006  | Remove unused `image` dependency                      | P2       | S      | —          | REJECTED — `image` is now used for PNG export (`src/main.rs:473`)
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
@@ -25,4 +25,4 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 
 ## Findings considered and rejected
 
-None — all findings from the audit were converted to plans.
+- **006 — Remove unused `image` dependency** (rejected 2026-06-15): The `image` crate was unused at plan time (commit `5a0cdfc`) but gained an active use-site at `src/main.rs:473` for saving `galaxy.png`. The dependency was bumped to `0.25.10` rather than removed.
