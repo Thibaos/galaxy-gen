@@ -395,7 +395,8 @@ pub fn render_scene(
         return;
     }
 
-    let idx = (py * params.image_width + px) as usize;
+    let buf_stride = params.image_width.div_ceil(64u32) * 64u32;
+    let idx = (py * buf_stride + px) as usize;
 
     // ── world position ─────────────────────────────────
     let extent_x = params.extent;

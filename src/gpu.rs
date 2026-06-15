@@ -222,12 +222,13 @@ pub fn compute_galaxy(
     }
 
     // copy rgba_buffer → target_texture
+    let padded_w = image_w.div_ceil(64) * 64;
     encoder.copy_buffer_to_texture(
         wgpu::TexelCopyBufferInfo {
             buffer: rgba_buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * image_w),
+                bytes_per_row: Some(4 * padded_w),
                 rows_per_image: Some(image_h),
             },
         },

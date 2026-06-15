@@ -310,7 +310,8 @@ impl App {
         // ── recreate rgba buffer if dimensions changed ─
         if self.rgba_buf_w != self.render_w || self.rgba_buf_h != self.render_h {
             let device = self.device.as_ref().unwrap();
-            let pixel_count = (self.render_w * self.render_h) as usize;
+            let padded_w = self.render_w.div_ceil(64) * 64;
+            let pixel_count = (padded_w * self.render_h) as usize;
             let u32_byte_size =
                 (pixel_count * std::mem::size_of::<u32>()) as wgpu::BufferAddress;
             self.rgba_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
