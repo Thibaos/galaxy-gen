@@ -63,7 +63,7 @@ cargo check        # Fast compile check
 cargo clippy       # Lint
 cargo test         # Run tests
 cargo build        # Build
-cargo run --release # Run optimized
+cargo run          # Run
 ```
 
 ## Architecture
