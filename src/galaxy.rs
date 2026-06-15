@@ -36,21 +36,21 @@ pub struct GalaxyParams {
 impl GalaxyParams {
     pub fn milky_way() -> Self {
         Self {
-            disk_scale_length: 8_500.0,
+            disk_scale_length: 7_500.0,
             disk_scale_height: 800.0,
-            disk_central_density: 0.1,
+            disk_central_density: 1e-8,
 
-            arm_count: 6,
-            arm_pitch: 0.6,
-            arm_concentration: 4.0,
-            arm_strength: 1.5,
+            arm_count: 5,
+            arm_pitch: 0.55,
+            arm_concentration: 5.0,
+            arm_strength: 1e6,
 
-            bulge_radius: 1_000.0,
-            bulge_central_density: 2.0,
+            bulge_radius: 2_000.0,
+            bulge_central_density: 0.1,
 
             halo_radius: 15_000.0,
-            halo_central_density: 1e-5,
-            halo_slope: -6.0,
+            halo_central_density: 1e-6,
+            halo_slope: -12.0,
         }
     }
 }

@@ -233,7 +233,7 @@ mod tests {
         let params = GalaxyParams::milky_way();
         let uniform =
             GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
-        // Field-by-field assertions to catch field-order bugs
+
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
         assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
         assert_eq!(
