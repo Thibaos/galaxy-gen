@@ -339,13 +339,6 @@ fn cell_star_light(cx: u32, cz: u32) -> Vec3 {
 /// galaxy profiles.
 #[allow(clippy::manual_saturating_arithmetic)]
 fn sample_star_grid(wx: f32, wz: f32, pixel_w: f32, pixel_h: f32, col_dens: f32) -> Vec3 {
-    // Suppress deep-space speckles: when stellar density is too low
-    // for meaningful sampling, return zero.
-    const MIN_COL_DENS: f32 = 0.01;
-    if col_dens < MIN_COL_DENS {
-        return Vec3::new(0.0, 0.0, 0.0);
-    }
-
     let half_w = pixel_w * 0.5;
     let half_h = pixel_h * 0.5;
 

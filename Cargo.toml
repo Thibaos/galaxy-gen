@@ -24,6 +24,9 @@ bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 winit = "0.30"
 image = "0.25.10"
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
 
 [profile.dev.build-override]
 opt-level = 3

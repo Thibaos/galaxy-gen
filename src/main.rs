@@ -20,8 +20,6 @@ const DEFAULT_CONTRAST: f32 = 0.04;
 const EXPOSURE_STEP: f32 = 0.02;
 const CONTRAST_STEP: f32 = 0.002;
 
-// ── App ─────────────────────────────────────────────────────
-
 struct App {
     params: GalaxyParams,
 
@@ -42,30 +40,35 @@ struct App {
 
     window: Option<Arc<Window>>,
 
-    // ── image dimensions ───────────────────
+    // image dimensions
     render_w: u32,
     render_h: u32,
     tex_w: u32,
     tex_h: u32,
 
-    // ── camera (galactic coords, ly) ───────
+    // camera (galactic coords, ly)
     center_x: f64,
     center_y: f64,
     extent_ly: f64,
     needs_render: bool,
 
-    // ── brightness ────────────────────────
+    // brightness
     exposure: f32,
     contrast: f32,
 
-    // ── compute pipeline (cached) ────────
+    // compute pipeline (cached)
     gpu_compute: Option<gpu::GpuCompute>,
     uniform_buffer: Option<wgpu::Buffer>,
     rgba_buffer: Option<wgpu::Buffer>,
     rgba_buf_w: u32,
     rgba_buf_h: u32,
 
-    // ── mouse ─────────────────────────────
+    // egui
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
+    egui_renderer: Option<egui_wgpu::Renderer>,
+
+    // mouse
     dragging: bool,
     last_mouse: (f64, f64),
     saved_startup_image: bool,
@@ -100,14 +103,15 @@ impl App {
             rgba_buffer: None,
             rgba_buf_w: 0,
             rgba_buf_h: 0,
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
+            egui_renderer: None,
             dragging: false,
             last_mouse: (0.0, 0.0),
             saved_startup_image: false,
         }
     }
 }
-
-// ── init ────────────────────────────────────────────────────
 
 impl App {
     fn init(&mut self, event_loop: &ActiveEventLoop) {
@@ -227,10 +231,28 @@ impl App {
         self.bind_group_layout = Some(bind_group_layout);
         self.sampler = Some(sampler);
 
-        // create cached compute pipeline resources
         self.gpu_compute = Some(gpu::GpuCompute::new(self.device.as_ref().unwrap()));
 
-        // create the initial texture + bind-group
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::viewport::ViewportId::default(),
+            &window,
+            None,
+            None,
+            None,
+        );
+
+        let egui_renderer = egui_wgpu::Renderer::new(
+            self.device.as_ref().unwrap(),
+            self.config.as_ref().unwrap().format,
+            None,
+            1,
+            false,
+        );
+
+        self.egui_state = Some(egui_state);
+        self.egui_renderer = Some(egui_renderer);
+
         self.recreate_texture();
     }
 
@@ -243,7 +265,6 @@ impl App {
         }
     }
 
-    /// Allocate (or re-allocate) the texture and bind-group at `render_w × render_h`.
     fn recreate_texture(&mut self) {
         let device = self.device.as_ref().unwrap();
         let bgl = self.bind_group_layout.as_ref().unwrap();
@@ -289,11 +310,8 @@ impl App {
     }
 }
 
-// ── redraw ───────────────────────────────────────────────────
-
 impl App {
     fn redraw(&mut self) {
-        // quick bail-out
         if self.surface.is_none()
             || self.device.is_none()
             || self.queue.is_none()
@@ -306,12 +324,10 @@ impl App {
             return;
         }
 
-        // ── resize texture if dimensions changed ──────
         if self.tex_w != self.render_w || self.tex_h != self.render_h {
             self.recreate_texture();
         }
 
-        // ── recreate rgba buffer if dimensions changed ─
         if self.rgba_buf_w != self.render_w || self.rgba_buf_h != self.render_h {
             let device = self.device.as_ref().unwrap();
             let padded_w = self.render_w.div_ceil(64) * 64;
@@ -327,6 +343,186 @@ impl App {
             self.rgba_buf_h = self.render_h;
         }
 
+        let window = self.window.as_ref().unwrap();
+        let window_scale = window.scale_factor() as f32;
+
+        let mut raw_input = self.egui_state.as_mut().unwrap().take_egui_input(window);
+        let inner_size = window.inner_size();
+        if let Some(vi) = raw_input
+            .viewports
+            .get_mut(&egui::viewport::ViewportId::default())
+        {
+            vi.inner_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(inner_size.width as f32, inner_size.height as f32) / window_scale,
+            ));
+        }
+        let mut request_screenshot = false;
+        let egui_ctx = self.egui_ctx.clone();
+        let full_output = egui_ctx.run(raw_input, |ctx| {
+            egui::SidePanel::right("galaxy_controls")
+                .default_width(280.0)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    ui.heading("Galaxy Controls");
+                    ui.separator();
+                    ui.label("Preset");
+                    let initial_idx: usize = if self.params.disk_scale_length < 9_000.0 {
+                        0
+                    } else {
+                        1
+                    };
+                    let mut preset_idx = initial_idx;
+                    egui::ComboBox::from_id_salt("preset")
+                        .selected_text(match preset_idx {
+                            0 => "Milky Way",
+                            _ => "NGC 628 (M74)",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut preset_idx, 0, "Milky Way");
+                            ui.selectable_value(&mut preset_idx, 1, "NGC 628 (M74)");
+                        });
+                    if preset_idx != initial_idx {
+                        self.params = match preset_idx {
+                            0 => GalaxyParams::milky_way(),
+                            _ => GalaxyParams::ngc628(),
+                        };
+                        self.needs_render = true;
+                    }
+
+                    ui.separator();
+                    ui.label("Disk");
+                    let mut changed = false;
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut self.params.disk_scale_length,
+                                1_000.0..=25_000.0,
+                            )
+                            .text("Scale length (ly)"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.disk_scale_height, 100.0..=5_000.0)
+                                .text("Scale height (ly)"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.disk_central_density, 0.0..=0.05)
+                                .text("Central density"),
+                        )
+                        .changed();
+
+                    // Spiral Arms sliders
+                    ui.separator();
+                    ui.label("Spiral Arms");
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.params.arm_count, 0..=8).text("Arm count"))
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.arm_pitch, 0.05..=0.8)
+                                .text("Pitch angle (rad)"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.arm_concentration, 1.0..=15.0)
+                                .text("Concentration"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.arm_strength, 0.0..=3.0)
+                                .text("Strength"),
+                        )
+                        .changed();
+
+                    // Bulge sliders
+                    ui.separator();
+                    ui.label("Bulge");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.bulge_radius, 500.0..=15_000.0)
+                                .text("Radius (ly)"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.bulge_central_density, 0.0..=0.2)
+                                .text("Central density"),
+                        )
+                        .changed();
+
+                    // Halo sliders
+                    ui.separator();
+                    ui.label("Halo");
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.halo_radius, 10_000.0..=200_000.0)
+                                .text("Radius (ly)"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.halo_central_density, 0.0..=1e-6)
+                                .text("Central density"),
+                        )
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.params.halo_slope, -5.0..=-1.5)
+                                .text("Slope"),
+                        )
+                        .changed();
+
+                    if changed {
+                        self.needs_render = true;
+                    }
+
+                    // Brightness sliders
+                    ui.separator();
+                    ui.label("Brightness");
+                    let exp_changed = ui
+                        .add(egui::Slider::new(&mut self.exposure, 0.0..=1.0).text("Exposure"))
+                        .changed();
+                    let con_changed = ui
+                        .add(egui::Slider::new(&mut self.contrast, 0.0..=0.2).text("Contrast"))
+                        .changed();
+                    if exp_changed || con_changed {
+                        self.update_title();
+                        self.needs_render = true;
+                    }
+
+                    // Actions
+                    ui.separator();
+                    if ui.button("Save Screenshot").clicked() {
+                        request_screenshot = true;
+                    }
+                    if ui.button("Reset Camera").clicked() {
+                        self.center_x = 0.0;
+                        self.center_y = 0.0;
+                        self.extent_ly = INITIAL_EXTENT_LY;
+                        self.needs_render = true;
+                    }
+
+                    // Frame timing
+                    ui.separator();
+                    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Frame: {:.1} ms",
+                                ui.ctx().input(|i| i.unstable_dt * 1000.0)
+                            ))
+                            .color(egui::Color32::GRAY)
+                            .size(11.0),
+                        );
+                    });
+                });
+        });
+
         let (surface, device, queue, config, pipeline, bind_group, texture, gpu_compute) = (
             self.surface.as_ref().unwrap(),
             self.device.as_ref().unwrap(),
@@ -338,7 +534,14 @@ impl App {
             self.gpu_compute.as_ref().unwrap(),
         );
 
-        // ── re-render galaxy (all on GPU) ────────────
+        let egui_renderer = self.egui_renderer.as_mut().unwrap();
+        for (id, delta) in full_output.textures_delta.set {
+            egui_renderer.update_texture(device, queue, id, &delta);
+        }
+        for id in full_output.textures_delta.free {
+            egui_renderer.free_texture(&id);
+        }
+
         if self.needs_render {
             let rgba_buf = self.rgba_buffer.as_ref().unwrap();
             let uniform_buf = self.uniform_buffer.get_or_insert_with(|| {
@@ -374,7 +577,6 @@ impl App {
             self.needs_render = false;
         }
 
-        // ── display ──────────────────────────────────
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost) => {
@@ -395,9 +597,33 @@ impl App {
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        if let Some(window) = &self.window {
+            self.egui_state
+                .as_mut()
+                .unwrap()
+                .handle_platform_output(window, full_output.platform_output);
+        }
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.render_w, self.render_h],
+            pixels_per_point: window_scale,
+        };
+        let tessellated = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let egui_renderer = self.egui_renderer.as_mut().unwrap();
+        egui_renderer.update_buffers(
+            device,
+            queue,
+            &mut encoder,
+            &tessellated,
+            &screen_descriptor,
+        );
+
         {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: None,
+            let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("galaxy+egui"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -410,15 +636,28 @@ impl App {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            let mut rpass = rpass.forget_lifetime();
+
             rpass.set_pipeline(pipeline);
             rpass.set_bind_group(0, bind_group, &[]);
             rpass.draw(0..3, 0..1);
+
+            egui_renderer.render(&mut rpass, &tessellated, &screen_descriptor);
         }
+
         queue.submit(Some(encoder.finish()));
         frame.present();
 
+        if request_screenshot {
+            let dev = self.device.as_ref().unwrap();
+            let q = self.queue.as_ref().unwrap();
+            self.save_snapshot(dev, q);
+        }
+
         if !self.saved_startup_image {
-            self.save_snapshot(device, queue);
+            let dev = self.device.as_ref().unwrap();
+            let q = self.queue.as_ref().unwrap();
+            self.save_snapshot(dev, q);
             self.saved_startup_image = true;
         }
     }
@@ -480,8 +719,6 @@ impl App {
     }
 }
 
-// ── event handling ──────────────────────────────────────────
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.init(event_loop);
@@ -493,6 +730,13 @@ impl ApplicationHandler for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        if let (Some(egui_state), Some(window)) = (&mut self.egui_state, &self.window) {
+            let response = egui_state.on_window_event(window, &event);
+            if response.repaint {
+                window.request_redraw();
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -509,9 +753,9 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── keyboard (brightness) ──────────────
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state.is_pressed()
+                    && !self.egui_ctx.wants_keyboard_input()
                     && let PhysicalKey::Code(key) = event.physical_key
                 {
                     match key {
@@ -526,7 +770,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── drag ─────────────────────────────────
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
@@ -540,7 +783,7 @@ impl ApplicationHandler for App {
                 let (lx, ly) = self.last_mouse;
                 self.last_mouse = (cx, cy);
 
-                if self.dragging {
+                if self.dragging && !self.egui_ctx.wants_pointer_input() {
                     let dx = cx - lx;
                     let dy = cy - ly;
 
@@ -553,8 +796,10 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── zoom (wheel) ─────────────────────────
             WindowEvent::MouseWheel { delta, .. } => {
+                if self.egui_ctx.wants_pointer_input() {
+                    return;
+                }
                 use winit::event::MouseScrollDelta;
                 let scroll: f64 = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as f64,
@@ -598,8 +843,6 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Only keep redrawing while we have work to do,
-        // otherwise wait for user input.
         if self.needs_render
             && let Some(window) = &self.window
         {
@@ -607,8 +850,6 @@ impl ApplicationHandler for App {
         }
     }
 }
-
-// ── entry point ─────────────────────────────────────────────
 
 fn main() {
     let params = GalaxyParams::milky_way();

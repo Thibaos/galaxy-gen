@@ -17,8 +17,7 @@ shader.
 ## Quick Start
 
 ```bash
-# Build and run
-cargo run --release
+cargo run
 ```
 
 ## Controls
@@ -55,16 +54,6 @@ No web searching required when tuning or adding new galaxy targets.
 | Arm pitch | Measured (cosmic microwave) | Estimated (images) |
 | Stellar mass | Measured (local) | Measured (PHANGS) |
 | Halo | Measured (local) | Scaled from MW |
-
-## Development
-
-```bash
-cargo check        # Fast compile check
-cargo clippy       # Lint
-cargo test         # Run tests
-cargo build        # Build
-cargo run          # Run
-```
 
 ## Architecture
 

@@ -13,7 +13,7 @@ Single binary, no server, no network, no database.
 | Lint      | `cargo clippy -- -D warnings` |
 | Test      | `cargo test`               |
 | Build     | `cargo build`              |
-| Run       | `cargo run --release`      |
+| Run       | `cargo run`      |
 
 ## Conventions
 
