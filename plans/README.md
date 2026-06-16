@@ -14,6 +14,7 @@ honor its STOP conditions, and update your row when done.
 | 004  | Remove dead shader entry points                       | P2       | S      | —          | DONE ✓ (2026-06-15) |
 | 005  | Add compile-time guard against host–shader struct mismatch | P2  | S      | —          | DONE ✓ (2026-06-15) |
 | 006  | Remove unused `image` dependency                      | P2       | S      | —          | REJECTED — `image` is now used for PNG export (`src/main.rs:473`)
+| 007  | Add interactive GUI with egui                         | P1       | L      | —          | TODO
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
@@ -21,7 +22,8 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 
 - **002 requires 001** because the tests validate `GalaxyUniform::from_params` which may be refactored in 001. If 001 doesn't touch `from_params`, 002 can execute independently — but the ordering is safer.
 - **003, 004, 005, 006** are fully independent of each other and of 001/002. They can be executed in any order or in parallel.
-- The recommended sequence: 003 first (establishes CI to validate everything else), then 001+002 in order, then 004+005+006 in any order.
+- **007** is fully independent of all prior plans — it only touches `Cargo.toml` and `src/main.rs`, building on the now-stable compute pipeline and galaxy presets.
+- The recommended sequence: 003 first (establishes CI to validate everything else), then 001+002 in order, then 004+005+006 in any order, then 007.
 
 ## Findings considered and rejected
 
