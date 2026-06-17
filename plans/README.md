@@ -10,7 +10,7 @@ honor its STOP conditions, and update your row when done.
 |------|------------------------------------------------------|----------|--------|------------|--------|
 | 001  | Cache GPU pipeline and shader resources across frames | P1       | S      | —          | DONE ✓ (2026-06-15) |
 | 002  | Add characterization tests for math-heavy code       | P1       | M      | 001        | DONE ✓ (2026-06-15) |
-| 003  | Establish README, AGENTS.md, CI, and lint config      | P1       | S      | —          | DONE ✓ (2026-06-15) |
+| 003  | Establish README, AGENTS.md, CI, and lint config      | P1       | S      | —          | REJECTED — project docs/config are maintained directly, not via plans; CI isn't viable for this project (spirv-builder + nightly components don't run in GH Actions)
 | 004  | Remove dead shader entry points                       | P2       | S      | —          | DONE ✓ (2026-06-15) |
 | 005  | Add compile-time guard against host–shader struct mismatch | P2  | S      | —          | DONE ✓ (2026-06-15) |
 | 006  | Remove unused `image` dependency                      | P2       | S      | —          | REJECTED — `image` is now used for PNG export (`src/main.rs:473`)
@@ -21,10 +21,11 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 ## Dependency notes
 
 - **002 requires 001** because the tests validate `GalaxyUniform::from_params` which may be refactored in 001. If 001 doesn't touch `from_params`, 002 can execute independently — but the ordering is safer.
-- **003, 004, 005, 006** are fully independent of each other and of 001/002. They can be executed in any order or in parallel.
+- **004, 005, 006** are fully independent of each other and of 001/002.
 - **007** is fully independent of all prior plans — it only touches `Cargo.toml` and `src/main.rs`, building on the now-stable compute pipeline and galaxy presets.
-- The recommended sequence: 003 first (establishes CI to validate everything else), then 001+002 in order, then 004+005+006 in any order, then 007.
+- Recommended sequence: 001+002 in order, then 004+005+006 in any order, then 007.
 
 ## Findings considered and rejected
 
 - **006 — Remove unused `image` dependency** (rejected 2026-06-15): The `image` crate was unused at plan time (commit `5a0cdfc`) but gained an active use-site at `src/main.rs:473` for saving `galaxy.png`. The dependency was bumped to `0.25.10` rather than removed.
+- **003 — Establish README, AGENTS.md, CI, and lint config** (rejected 2026-06-17): Project docs and config files (README, AGENTS.md, clippy.toml, LICENSE, .env.example) are maintained directly, not through plans. CI was attempted but spirv-builder + nightly Rust components don't work in GitHub Actions on the free tier, so the workflow was removed. The handwritten artefacts (README, AGENTS.md, LICENSE, clippy.toml, .env.example) are all present and useful; they just don't belong in the plan backlog.

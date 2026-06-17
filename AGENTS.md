@@ -52,5 +52,6 @@ Single binary, no server, no network, no database.
 - The `build.rs` compiles `galaxy-shader` to SPIR-V and embeds it via `env!("galaxy_shader.spv")`
 - Changing `galaxy-shader/src/lib.rs` requires a clean rebuild (`cargo clean` or touch `build.rs`)
 - The SPIR-V compute shader uses 8×8 thread groups; image dimensions must be divisible by 8 or the shader handles out-of-bounds via early-return
-- The `image` crate is listed in Cargo.toml but unused — plans 006 removes it
-- Pan: mouse drag. Zoom: mouse wheel. Exposure: ← →. Contrast: ↑ ↓.
+- The `image` crate is used for PNG export via `save_snapshot()` in `src/main.rs`
+- Pan: mouse drag (gated behind egui focus). Zoom: mouse wheel. Exposure: ← →. Contrast: ↑ ↓.
+- The egui sidebar provides sliders for all galaxy parameters, exposure, contrast, preset switching, and screenshot — these are the primary controls now
