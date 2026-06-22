@@ -15,7 +15,7 @@ before starting, honor its STOP conditions, and update your row when done.
 | 005  | Add compile-time guard against host–shader struct mismatch | P2  | S      | —          | DONE ✓ (2026-06-15) |
 | 006  | Remove unused `image` dependency                      | P2       | S      | —          | REJECTED — `image` is now used for PNG export (`src/main.rs:473`)
 | 007  | Add interactive GUI with egui                         | P1       | L      | —          | DONE ✅ (2026-06-16) |
-| 008  | Fix spiral arm formula to logarithmic spiral          | P1       | M      | —          | TODO |
+| 008  | Fix spiral arm formula to logarithmic spiral          | P1       | M      | —          | DONE ✅ (2026-06-22) |
 | 009  | Remove dead shader functions                          | P2       | S      | —          | DONE ✅ (2026-06-22) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
