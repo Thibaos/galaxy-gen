@@ -67,13 +67,21 @@ fn disk_column(r: f32, p: &GalaxyUniform) -> f32 {
     2.0 * p.disk_scale_height * p.disk_central_density * radial
 }
 
-/// Same spiral modulation but takes flat (x,z) instead of Vec3.
+/// Logarithmic spiral arm modulation.
+///
+/// Each arm follows θ = cot(φ)·ln(1 + r/h_r)  where φ = `arm_pitch`
+/// is the true pitch angle (angle between spiral tangent and the
+/// tangent circle).  The `1 +` avoids a singularity at the origin
+/// where the bulge dominates anyway.
 fn arm_modulation_2d(x: f32, z: f32, r: f32, p: &GalaxyUniform) -> f32 {
     if p.arm_count == 0 || p.arm_strength <= 0.0 {
         return 1.0;
     }
     let theta = x.atan2(z);
-    let log_spiral = theta - (r / p.disk_scale_length) * p.arm_pitch;
+    // Logarithmic spiral: θ = cot(φ) × ln(r/r₀)
+    // Guard r > 0 to avoid ln(0); use ln(1 + r/hr) for smooth centre
+    let cot_phi = 1.0 / p.arm_pitch.tan();
+    let log_spiral = theta - cot_phi * (1.0 + r / p.disk_scale_length).ln();
 
     let arm_width = 1.0 / p.arm_concentration;
     let mut min_dtheta = PI;

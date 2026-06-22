@@ -13,7 +13,9 @@ pub struct GalaxyParams {
     // ── spiral arms ───────────────────────────
     /// Number of logarithmic spiral arms.
     pub arm_count: u32,
-    /// Pitch angle in radians (tightness of the winding).
+    /// Pitch angle φ in radians — the angle between the spiral tangent
+    /// and the circle of constant radius.  Typical values: 0.10 (6°, tight)
+    /// to 0.35 (20°, open).  Used in the logarithmic spiral formula.
     pub arm_pitch: f64,
     /// How concentrated each arm is azimuthally (larger = tighter).
     pub arm_concentration: f64,
@@ -52,7 +54,9 @@ impl GalaxyParams {
             disk_central_density: 4.37e-3,
 
             arm_count: 4,
-            arm_pitch: 0.22,
+            // Pitch angle: ~12° = 0.21 rad (consistent with MW
+            // arm measurements — Lin & Shu 1964, Vallee 2005).
+            arm_pitch: 0.21,
             arm_concentration: 5.0,
             // Physical: spiral arms enhance surface density by ≈2×.
             arm_strength: 1.0,

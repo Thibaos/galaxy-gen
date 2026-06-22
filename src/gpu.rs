@@ -498,6 +498,104 @@ mod tests {
         // halo_radius=0 returns the center value regardless of r
     }
 
+    fn host_arm_modulation_2d(x: f32, z: f32, p: &GalaxyParams) -> f32 {
+        let hr = p.disk_scale_length as f32;
+        let r = (x * x + z * z).sqrt();
+        if p.arm_count == 0 || p.arm_strength <= 0.0 || hr <= 0.0 {
+            return 1.0;
+        }
+        let theta = x.atan2(z);
+        // Logarithmic spiral: θ = cot(φ) × ln(1 + r/hr)
+        let cot_phi = 1.0 / (p.arm_pitch as f32).tan();
+        let log_spiral = theta - cot_phi * (1.0 + r / hr).ln();
+        let arm_width = 1.0 / p.arm_concentration as f32;
+        let mut min_dtheta = std::f32::consts::PI;
+        for k in 0..p.arm_count {
+            let phase = log_spiral + std::f32::consts::TAU * (k as f32) / (p.arm_count as f32);
+            let dtheta = phase % std::f32::consts::TAU;
+            let dtheta = if dtheta > std::f32::consts::PI {
+                dtheta - std::f32::consts::TAU
+            } else {
+                dtheta
+            };
+            min_dtheta = min_dtheta.min(dtheta.abs());
+        }
+        let arg = min_dtheta / arm_width;
+        1.0 + p.arm_strength as f32 * (-0.5 * arg * arg).exp()
+    }
+
+    #[test]
+    fn arm_modulation_no_arms_returns_one() {
+        let mut p = GalaxyParams::milky_way();
+        p.arm_count = 0;
+        assert!((host_arm_modulation_2d(1000.0, 500.0, &p) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn arm_modulation_zero_strength_returns_one() {
+        let mut p = GalaxyParams::milky_way();
+        p.arm_strength = 0.0;
+        assert!((host_arm_modulation_2d(5000.0, 3000.0, &p) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn arm_modulation_is_positive() {
+        for (label, p) in [
+            ("MW", GalaxyParams::milky_way()),
+            ("NGC628", GalaxyParams::ngc628()),
+        ] {
+            for (r, theta) in &[
+                (1000.0_f32, 0.0_f32),
+                (5000.0, 0.5),
+                (15000.0, 1.2),
+                (25000.0, 2.0),
+            ] {
+                let x = r * theta.sin();
+                let z = r * theta.cos();
+                let m = host_arm_modulation_2d(x, z, &p);
+                assert!(
+                    m.is_finite() && m > 0.0,
+                    "{label} modulation at r={r}, θ={theta} = {m} not positive+finite"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arm_modulation_enhances_along_arms() {
+        let mut p = GalaxyParams::milky_way();
+        p.arm_strength = 1.0;
+        let r = 0.5 * p.disk_scale_length as f32;
+        let cot_phi = 1.0 / (p.arm_pitch as f32).tan();
+        let theta_on_arm = cot_phi * (1.0 + r / p.disk_scale_length as f32).ln();
+        let x = r * theta_on_arm.sin();
+        let z = r * theta_on_arm.cos();
+        let m = host_arm_modulation_2d(x, z, &p);
+        assert!(
+            (m - 2.0).abs() < 0.01,
+            "on-arm modulation = {m}, expected ~2.0"
+        );
+    }
+
+    #[test]
+    fn arm_modulation_periodic_across_arms() {
+        let p = GalaxyParams::milky_way();
+        let r = 8000.0f32;
+        let theta0 = 1.0f32;
+        let spacing = std::f32::consts::TAU / p.arm_count as f32;
+        let x0 = r * theta0.sin();
+        let z0 = r * theta0.cos();
+        let x1 = r * (theta0 + spacing).sin();
+        let z1 = r * (theta0 + spacing).cos();
+        let m0 = host_arm_modulation_2d(x0, z0, &p);
+        let m1 = host_arm_modulation_2d(x1, z1, &p);
+        assert!(
+            (m0 - m1).abs() < 1e-5,
+            "modulation at θ={theta0} = {m0}, at θ={} = {m1}; should match",
+            theta0 + spacing
+        );
+    }
+
     #[test]
     fn galaxy_uniform_field_offsets_match_shader_layout() {
         // These offsets MUST match the shader-side GalaxyUniform layout.
