@@ -2,6 +2,9 @@
 #![allow(clippy::manual_saturating_arithmetic)]
 
 use spirv_std::glam::{UVec3, Vec3};
+// Real trait provides f32 methods (exp, ln, powf, …) in no_std SPIR-V context.
+// The compiler sees no explicit `Real::` calls but methods are used implicitly
+// via UFCS resolution.
 #[allow(unused)]
 use spirv_std::num_traits::real::Real;
 use spirv_std::spirv;
@@ -40,16 +43,6 @@ fn rem_euclid(x: f32, y: f32) -> f32 {
     } else {
         r
     }
-}
-
-#[allow(dead_code)]
-fn density(pos: Vec3, p: &GalaxyUniform) -> f32 {
-    let r = (pos.x * pos.x + pos.z * pos.z).sqrt();
-    let z = pos.y.abs();
-
-    disk_density(r, z, p) * arm_modulation(pos, r, p)
-        + bulge_density(pos.length(), p)
-        + halo_density(pos.length(), p)
 }
 
 // ── Column density (stars / ly²) ───────────────────────────
@@ -114,57 +107,6 @@ fn halo_column(r: f32, p: &GalaxyUniform) -> f32 {
     }
     let x = r / p.halo_radius;
     PI * p.halo_radius * p.halo_central_density * (1.0 + x).powf(p.halo_slope + 1.0)
-}
-
-#[allow(dead_code)]
-fn disk_density(r: f32, z: f32, p: &GalaxyUniform) -> f32 {
-    if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
-        return 0.0;
-    }
-    let radial = (-r / p.disk_scale_length).exp();
-    let zeta = z / p.disk_scale_height;
-    let sech = 1.0 / zeta.cosh();
-    p.disk_central_density * radial * sech * sech
-}
-
-#[allow(dead_code)]
-fn arm_modulation(pos: Vec3, r: f32, p: &GalaxyUniform) -> f32 {
-    if p.arm_count == 0 || p.arm_strength <= 0.0 {
-        return 1.0;
-    }
-    let theta = pos.x.atan2(pos.z);
-    let log_spiral = theta - (r / p.disk_scale_length) * p.arm_pitch;
-
-    let arm_width = 1.0 / p.arm_concentration;
-    let mut min_dtheta = PI;
-
-    for k in 0..p.arm_count {
-        let phase = log_spiral + TAU * (k as f32) / (p.arm_count as f32);
-        let dtheta = rem_euclid(phase, TAU);
-        let dtheta = if dtheta > PI { dtheta - TAU } else { dtheta };
-        min_dtheta = min_dtheta.min(dtheta.abs());
-    }
-
-    let arg = min_dtheta / arm_width;
-    1.0 + p.arm_strength * (-0.5 * arg * arg).exp()
-}
-
-#[allow(dead_code)]
-fn bulge_density(dist: f32, p: &GalaxyUniform) -> f32 {
-    if p.bulge_radius <= 0.0 {
-        return 0.0;
-    }
-    let x = dist / p.bulge_radius;
-    p.bulge_central_density * (1.0 + x * x).powf(-2.5)
-}
-
-#[allow(dead_code)]
-fn halo_density(dist: f32, p: &GalaxyUniform) -> f32 {
-    if p.halo_radius <= 0.0 || dist < 1e-6 {
-        return p.halo_central_density;
-    }
-    let x = dist / p.halo_radius;
-    p.halo_central_density * (1.0 + x).powf(p.halo_slope)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -274,12 +216,6 @@ const STAR_OFFSET: f32 = 1_000_000.0;
 /// Map a world coordinate to a non-negative star-cell index.
 fn star_cell(w: f32) -> u32 {
     ((w + STAR_OFFSET) * INV_STAR_CELL_SIZE) as u32
-}
-
-/// Smooth Hermite interpolation (same as GLSL smoothstep).
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// Deterministic check: does this star cell contain at least one star?
