@@ -33,7 +33,7 @@ pub struct GalaxyUniform {
     pub log_contrast: f32,
 }
 
-const PI: f32 = 3.141_592_7;
+const PI: f32 = core::f32::consts::PI;
 const TAU: f32 = 2.0 * PI;
 
 fn rem_euclid(x: f32, y: f32) -> f32 {
@@ -449,5 +449,8 @@ pub fn render_scene(
     let r8 = (r * 255.0) as u32;
     let g8 = (g * 255.0) as u32;
     let b8 = (b * 255.0) as u32;
-    rgba[idx] = r8 << 16 | g8 << 8 | b8 | 0xff_00_00_00;
+    // Pack into native RGBA byte order: R at byte 0, G at byte 1,
+    // B at byte 2, A at byte 3.  This matches Rgba8Unorm texture format
+    // expected by copy_buffer_to_texture and the PNG export.
+    rgba[idx] = r8 | g8 << 8 | b8 << 16 | 0xff_00_00_00;
 }

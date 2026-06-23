@@ -18,6 +18,8 @@ before starting, honor its STOP conditions, and update your row when done.
 | 008  | Fix spiral arm formula to logarithmic spiral          | P1       | M      | —          | DONE ✅ (2026-06-22) |
 | 009  | Remove dead shader functions                          | P2       | S      | —          | DONE ✅ (2026-06-22) |
 | 010  | Physical star colors via spectrum-based LUT           | P1       | M      | —          | DONE ✅ (2026-06-23) |
+| 011  | 3D density profiles, camera model, and ray-march      | P1       | L      | —          | TODO   |
+| 012  | GPU-instanced star rendering with soft point sprites  | P1       | L      | 011        | TODO   |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
@@ -28,6 +30,7 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
 - **007** is fully independent of all prior plans — it only touches `Cargo.toml` and `src/main.rs`, building on the now-stable compute pipeline and galaxy presets.
 - **008** and **009** are independent of each other and of all prior plans.  009 removes dead 3D density helpers; 008 fixes the live `arm_modulation_2d` formula.  Recommended order: 009 first (simpler, no risk), then 008 (changes visual output).
 - Recommended sequence: 009, then 008.  (The previous seven are done.)
+- **012 requires 011** because the instanced star pass depends on the 3D camera model (view-proj matrix, orbit controls), the `render_mode` field on `GalaxyUniform`, and the ray-march rendering path from 011.  The star catalogue is generated on the CPU and uploaded to a storage buffer — no SPIR-V changes needed.
 
 ## Findings considered and rejected
 
