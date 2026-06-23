@@ -597,6 +597,56 @@ mod tests {
     }
 
     #[test]
+    fn arm_modulation_zero_pitch_does_not_nan() {
+        // pitch=0 causes cot(0) = inf in both host and shader,
+        // which could produce NaN.  Verify graceful handling.
+        let mut p = GalaxyParams::milky_way();
+        p.arm_pitch = 0.0;
+        let m = host_arm_modulation_2d(5000.0, 3000.0, &p);
+        // The function should still return a finite, positive value
+        // (arm modulation still works with pitch=0 meaning radial arms).
+        // At minimum it must not NaN or inf.
+        assert!(m.is_finite(), "pitch=0 modulation = {m} is not finite");
+        assert!(m > 0.0, "pitch=0 modulation = {m} should be positive");
+    }
+
+    #[test]
+    fn arm_modulation_zero_concentration_returns_max() {
+        // concentration=0 → arm_width = inf → arg = 0 → exp(-0) = 1 → 1 + strength
+        let mut p = GalaxyParams::milky_way();
+        p.arm_concentration = 0.0;
+        let m = host_arm_modulation_2d(5000.0, 3000.0, &p);
+        assert!(m.is_finite(), "conc=0 modulation = {m} is not finite");
+        assert!(
+            (m - (1.0 + p.arm_strength as f32)).abs() < 1e-6,
+            "conc=0 modulation = {m}, expected {}",
+            1.0 + p.arm_strength as f32
+        );
+    }
+
+    #[test]
+    fn arm_modulation_quadrant_coverage() {
+        // Test all four quadrants for correct atan2 handling.
+        // Coordinates are placed at the same radius and relative angle
+        // in each quadrant.
+        let p = GalaxyParams::milky_way();
+        let r = 10000.0f32;
+        let test_positions = [
+            ("Q1 (+x,+z)", r, r),
+            ("Q2 (-x,+z)", -r, r),
+            ("Q3 (-x,-z)", -r, -r),
+            ("Q4 (+x,-z)", r, -r),
+        ];
+        for (label, x, z) in &test_positions {
+            let m = host_arm_modulation_2d(*x, *z, &p);
+            assert!(
+                m.is_finite() && m > 0.0,
+                "{label} modulation = {m} not positive+finite"
+            );
+        }
+    }
+
+    #[test]
     fn galaxy_uniform_field_offsets_match_shader_layout() {
         // These offsets MUST match the shader-side GalaxyUniform layout.
         // The shader uses spirv-std glam types (f32 = 4 bytes, u32 = 4 bytes)

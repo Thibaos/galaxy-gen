@@ -74,7 +74,7 @@ fn disk_column(r: f32, p: &GalaxyUniform) -> f32 {
 /// tangent circle).  The `1 +` avoids a singularity at the origin
 /// where the bulge dominates anyway.
 fn arm_modulation_2d(x: f32, z: f32, r: f32, p: &GalaxyUniform) -> f32 {
-    if p.arm_count == 0 || p.arm_strength <= 0.0 {
+    if p.arm_count == 0 || p.arm_strength <= 0.0 || p.disk_scale_length <= 0.0 {
         return 1.0;
     }
     let theta = x.atan2(z);
@@ -212,10 +212,7 @@ const STAR_CELL_SIZE: f32 = 0.1;
 /// Precomputed 1.0 / STAR_CELL_SIZE for multiply instead of divide.
 const INV_STAR_CELL_SIZE: f32 = 10.0;
 
-/// Max star cells iterated per pixel (prevents GPU timeout
-/// at extreme zoom-out in sparse regions).
-
-/// Fixed window side length = √MAX_STAR_CELLS = 16.
+/// Fixed window side length = 16 cells (256 cells total).
 const WINDOW_SIDE: u32 = 16;
 
 /// World-coordinate offset that keeps cell indices >= 0.
