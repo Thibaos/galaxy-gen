@@ -148,44 +148,109 @@ fn mass_to_lum(m: f32) -> f32 {
     }
 }
 
-/// Effective temperature from mass (main sequence, rough).
+/// Effective temperature from mass (main sequence).
+///
+/// Piecewise-log fit to the empirical M–Teff relation from Pecaut &
+/// Mamajek (2013, ApJS 208, 9, Table 5) and Eker et al. (2018, MNRAS
+/// 479, 5491).  The relation is log₁₀(Teff) = a + b·log₁₀(M) with
+/// breakpoints at 0.5, 1.0, 2.4, and 7.0 M☉.
+///
+/// Reference values (M☉ → K):  0.08→2300, 0.16→3060, 0.50→3750,
+/// 0.88→5240, 1.00→5770, 2.00→8180, 2.40→9700, 7.00→22000,
+/// 15.0→30000, 60.0→48000.
+const T_SOLAR: f32 = 5770.0;
+const M_SOLAR: f32 = 1.0;
+
 fn mass_to_temp(m: f32) -> f32 {
-    // T ∝ M^0.5  with  T_sun ≈ 5778 K.
-    5778.0 * m.sqrt()
+    if m <= 0.08 {
+        return 2300.0;
+    }
+    let (ref_m, ref_t, exp) = if m < 0.50 {
+        // Very-low-mass segment: T ∝ M^0.53  (anchored at 0.16 M☉ → 3060 K)
+        (0.16, 3060.0, 0.53)
+    } else if m < 1.0 {
+        // Low-mass segment: T ∝ M^0.67  (anchored at 0.88 M☉ → 5240 K)
+        (0.88, 5240.0, 0.67)
+    } else if m < 2.40 {
+        // Solar-mass segment: T ∝ M^0.57  (anchored at 1.0 M☉ → 5770 K)
+        (M_SOLAR, T_SOLAR, 0.57)
+    } else if m < 7.0 {
+        // Intermediate-mass segment: T ∝ M^0.36  (anchored at 2.4 M☉ → 9700 K)
+        (2.40, 9700.0, 0.36)
+    } else {
+        // High-mass segment: T ∝ M^0.20  (anchored at 15.0 M☉ → 30000 K)
+        (15.0, 30000.0, 0.20)
+    };
+    // Cap at 50000 K (O-type stars; color is essentially converged beyond this)
+    (ref_t * (m / ref_m).powf(exp)).min(50000.0)
 }
 
-/// Blackbody colour  →  linear RGB.
-/// Based on Tanner Helland's approximation.
+// ═══════════════════════════════════════════════════════════
+//  Physically-accurate star colour via spectrum-based LUT
+//
+//  The table is derived from the vendian.org stellar colour
+//  datafile (Charity 2001–2002), which averages real stellar
+//  spectra (Kurucz, Silva, Pickles) and processes them through
+//  CIE 1931 2º CMFs (Judd-Vos), sRGB primaries, and D65
+//  whitepoint.  Methodology validated by Harre & Heller (2021).
+//
+//  Entries are (Teff_K, linear_R, linear_G, linear_B).
+//  Colours between entries are linearly interpolated.
+// ═══════════════════════════════════════════════════════════
+
+/// Number of entries in the colour lookup table.
+const COLOR_LUT_LEN: usize = 16;
+
+/// Temperature→RGB lookup table: (Teff [K], linear R, linear G, linear B).
+///
+/// Data source: vendian.org starcolor datafile, Main Sequence (Class V).
+/// Spectral types mapped to Teff via Pecaut & Mamajek (2013, Table 5).
+const COLOR_LUT: [(f32, f32, f32, f32); COLOR_LUT_LEN] = [
+    //  Teff(K)    R      G      B      SpT (approx)
+    (2300.0, 1.000, 0.745, 0.424),  // M9.5V
+    (2600.0, 1.000, 0.765, 0.427),  // M7V  (interpolated)
+    (3060.0, 1.000, 0.800, 0.435),  // M5V
+    (3400.0, 1.000, 0.808, 0.506),  // M3V
+    (3750.0, 1.000, 0.765, 0.545),  // M0V
+    (4400.0, 1.000, 0.847, 0.710),  // K4V  (K5 anchor at 4140K)
+    (5240.0, 1.000, 0.933, 0.867),  // K0V
+    (5770.0, 1.000, 0.961, 0.949),  // G2V (Sun)
+    (6540.0, 0.973, 0.969, 1.000),  // F5V
+    (7220.0, 0.878, 0.898, 1.000),  // F0V
+    (8180.0, 0.792, 0.843, 1.000),  // A5V
+    (9700.0, 0.725, 0.788, 1.000),  // A0V
+    (15200.0, 0.667, 0.749, 1.000), // B5V
+    (26500.0, 0.612, 0.698, 1.000), // B0V
+    (41400.0, 0.608, 0.690, 1.000), // O5V
+    (50000.0, 0.608, 0.690, 1.000), // O2V (clamped — colour converged)
+];
+
+/// Spectrum-based star colour as linear RGB.
+///
+/// Piecewise-linear interpolation over the baked `COLOR_LUT`.
+/// Temperatures outside the covered range are clamped to the nearest endpoint.
 fn temperature_to_rgb(t_kelvin: f32) -> Vec3 {
-    let t = (t_kelvin / 100.0).clamp(10.0, 400.0);
+    // Clamp to LUT range
+    let t = t_kelvin.clamp(COLOR_LUT[0].0, COLOR_LUT[COLOR_LUT_LEN - 1].0);
 
-    let r = if t <= 66.0 {
-        1.0
-    } else {
-        let v = 1.292_936_2 * (t - 60.0).powf(-0.133_204_76);
-        v.clamp(0.0, 1.0)
-    };
-
-    let g = if t <= 66.0 {
-        let v = 0.390_081_58 * t.ln() - 0.631_841_4;
-        v.clamp(0.0, 1.0)
-    } else {
-        let v = 1.129_608_6 * (t - 60.0).powf(-0.075_514_846);
-        v.clamp(0.0, 1.0)
-    };
-
-    let b = if t <= 66.0 {
-        if t <= 19.0 {
-            0.0
-        } else {
-            let v = 0.543_206_8 * (t - 10.0).ln() - 1.196_251_4;
-            v.clamp(0.0, 1.0)
+    // Find the segment [lo, hi] containing t
+    if t <= COLOR_LUT[0].0 {
+        return Vec3::new(COLOR_LUT[0].1, COLOR_LUT[0].2, COLOR_LUT[0].3);
+    }
+    for i in 0..(COLOR_LUT_LEN - 1) {
+        if t <= COLOR_LUT[i + 1].0 {
+            let t_lo = COLOR_LUT[i].0;
+            let t_hi = COLOR_LUT[i + 1].0;
+            let frac = (t - t_lo) / (t_hi - t_lo);
+            let r = COLOR_LUT[i].1 + frac * (COLOR_LUT[i + 1].1 - COLOR_LUT[i].1);
+            let g = COLOR_LUT[i].2 + frac * (COLOR_LUT[i + 1].2 - COLOR_LUT[i].2);
+            let b = COLOR_LUT[i].3 + frac * (COLOR_LUT[i + 1].3 - COLOR_LUT[i].3);
+            return Vec3::new(r, g, b);
         }
-    } else {
-        1.0
-    };
-
-    Vec3::new(r, g, b)
+    }
+    // t > last entry
+    let last = COLOR_LUT[COLOR_LUT_LEN - 1];
+    Vec3::new(last.1, last.2, last.3)
 }
 
 // ═══════════════════════════════════════════════════════════

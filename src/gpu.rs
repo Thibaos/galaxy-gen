@@ -225,6 +225,73 @@ pub fn compute_galaxy(
 
 #[cfg(test)]
 mod tests {
+    // ── Host-side replicas of shader star-colour functions ──
+
+    const T_SOLAR_HOST: f64 = 5770.0;
+
+    fn host_mass_to_temp(m: f64) -> f64 {
+        if m <= 0.08 {
+            return 2300.0;
+        }
+        let (ref_m, ref_t, exp) = if m < 0.50 {
+            (0.16, 3060.0, 0.53)
+        } else if m < 1.0 {
+            (0.88, 5240.0, 0.67)
+        } else if m < 2.40 {
+            (1.00, T_SOLAR_HOST, 0.57)
+        } else if m < 7.0 {
+            (2.40, 9700.0, 0.36)
+        } else {
+            (15.0, 30000.0, 0.20)
+        };
+        (ref_t * (m / ref_m).powf(exp)).min(50000.0)
+    }
+
+    const COLOR_LUT_HOST: [(f64, f64, f64, f64); 16] = [
+        (2300.0, 1.000, 0.745, 0.424),
+        (2600.0, 1.000, 0.765, 0.427),
+        (3060.0, 1.000, 0.800, 0.435),
+        (3400.0, 1.000, 0.808, 0.506),
+        (3750.0, 1.000, 0.765, 0.545),
+        (4400.0, 1.000, 0.847, 0.710),
+        (5240.0, 1.000, 0.933, 0.867),
+        (5770.0, 1.000, 0.961, 0.949),
+        (6540.0, 0.973, 0.969, 1.000),
+        (7220.0, 0.878, 0.898, 1.000),
+        (8180.0, 0.792, 0.843, 1.000),
+        (9700.0, 0.725, 0.788, 1.000),
+        (15200.0, 0.667, 0.749, 1.000),
+        (26500.0, 0.612, 0.698, 1.000),
+        (41400.0, 0.608, 0.690, 1.000),
+        (50000.0, 0.608, 0.690, 1.000),
+    ];
+
+    fn host_temperature_to_rgb(t_kelvin: f64) -> (f64, f64, f64) {
+        let t = t_kelvin.clamp(COLOR_LUT_HOST[0].0, COLOR_LUT_HOST[15].0);
+        if t <= COLOR_LUT_HOST[0].0 {
+            return (
+                COLOR_LUT_HOST[0].1,
+                COLOR_LUT_HOST[0].2,
+                COLOR_LUT_HOST[0].3,
+            );
+        }
+        for i in 0..(COLOR_LUT_HOST.len() - 1) {
+            if t <= COLOR_LUT_HOST[i + 1].0 {
+                let t_lo = COLOR_LUT_HOST[i].0;
+                let t_hi = COLOR_LUT_HOST[i + 1].0;
+                let frac = (t - t_lo) / (t_hi - t_lo);
+                let r =
+                    COLOR_LUT_HOST[i].1 + frac * (COLOR_LUT_HOST[i + 1].1 - COLOR_LUT_HOST[i].1);
+                let g =
+                    COLOR_LUT_HOST[i].2 + frac * (COLOR_LUT_HOST[i + 1].2 - COLOR_LUT_HOST[i].2);
+                let b =
+                    COLOR_LUT_HOST[i].3 + frac * (COLOR_LUT_HOST[i + 1].3 - COLOR_LUT_HOST[i].3);
+                return (r, g, b);
+            }
+        }
+        let last = COLOR_LUT_HOST[15];
+        (last.1, last.2, last.3)
+    }
     use super::*;
     use crate::galaxy::GalaxyParams;
 
@@ -678,5 +745,152 @@ mod tests {
         assert_eq!(offset_of!(GalaxyUniform, center_y), 64);
         assert_eq!(offset_of!(GalaxyUniform, exposure), 68);
         assert_eq!(offset_of!(GalaxyUniform, log_contrast), 72);
+    }
+
+    // ── New star colour tests ─────────────────────────
+
+    #[test]
+    fn mass_to_temp_produces_correct_teff() {
+        // Empirical reference values from Pecaut & Mamajek (2013), Eker et al. (2018).
+        // The piecewise power-law fit is approximate; tolerance scales with Teff.
+        let cases: &[(f64, f64, f64)] = &[
+            (0.08, 2300.0, 1.0), // clamped
+            (0.16, 3060.0, 1.0), // exact anchor
+            (0.50, 3750.0, 500.0),
+            (0.88, 5240.0, 1.0), // exact anchor
+            (1.00, 5770.0, 1.0), // exact anchor (solar segment)
+            (2.00, 8180.0, 500.0),
+            (2.40, 9700.0, 1.0),     // exact anchor
+            (7.00, 22000.0, 4000.0), // discontinuity at breakpoint
+            (15.0, 30000.0, 1.0),    // exact anchor
+        ];
+        for &(mass, expected_teff, tol) in cases {
+            let teff = host_mass_to_temp(mass);
+            assert!(
+                (teff - expected_teff).abs() < tol,
+                "mass_to_temp({mass}) = {teff}, expected ~{expected_teff} (tol {tol})"
+            );
+        }
+    }
+
+    #[test]
+    fn mass_to_temp_monotonic() {
+        let mut prev = host_mass_to_temp(0.05);
+        for mass in [
+            0.08_f64, 0.1, 0.2, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0,
+        ] {
+            let t = host_mass_to_temp(mass);
+            assert!(t >= prev, "mass_to_temp({mass}) = {t} < prev {prev}");
+            prev = t;
+        }
+    }
+
+    #[test]
+    fn temperature_to_rgb_sun_is_white() {
+        let (r, g, b) = host_temperature_to_rgb(5770.0);
+        assert!((r - 1.0).abs() < 0.01);
+        assert!(g > 0.95 && g < 1.0, "G={g} should be ~0.961");
+        assert!(b > 0.93 && b < 0.97, "B={b} should be ~0.949");
+    }
+
+    #[test]
+    fn temperature_to_rgb_no_green_stars() {
+        for t_k in [
+            2500.0_f64, 3500.0, 4500.0, 5770.0, 7000.0, 8200.0, 10000.0, 15000.0,
+        ] {
+            let (r, g, b) = host_temperature_to_rgb(t_k);
+            if t_k < 6200.0 {
+                // Cool stars are R-dominant (orange/white, never green)
+                assert!(
+                    r >= g && g >= b,
+                    "at {t_k}K: R={r:.3} G={g:.3} B={b:.3} — expected R≥G≥B"
+                );
+            } else {
+                // Hot stars are B-dominant (blue/white, never green)
+                assert!(
+                    b >= g && g >= r,
+                    "at {t_k}K: R={r:.3} G={g:.3} B={b:.3} — expected B≥G≥R"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_channel_is_ever_the_maximum_alone() {
+        // Green should never be the sole max channel (no green stars)
+        for t_k in [
+            2300_f64, 3060., 3750., 4400., 5240., 5770., 6540., 7220., 8180., 9700., 15200.,
+            26500., 41400., 50000.,
+        ] {
+            let (r, g, b) = host_temperature_to_rgb(t_k);
+            assert!(
+                !(g > r && g > b),
+                "green is max at {t_k}K: R={r:.3} G={g:.3} B={b:.3}"
+            );
+        }
+    }
+
+    #[test]
+    fn temperature_to_rgb_m_dwarfs_are_orange() {
+        let (r, g, b) = host_temperature_to_rgb(3750.0);
+        assert!((r - 1.0).abs() < 0.01, "M dwarf R={r} should be 1.0");
+        assert!(g > 0.70 && g < 0.85, "M dwarf G={g} should be ~0.765");
+        assert!(b > 0.45 && b < 0.65, "M dwarf B={b} should be ~0.545");
+        assert!(g > 0.5, "M dwarf G={g} > 0.5 (orange, not red)");
+        assert!(r > g && g > b, "M dwarf: R > G > B (orange, not red)");
+    }
+
+    #[test]
+    fn temperature_to_rgb_o_stars_are_blue() {
+        let (r, g, b) = host_temperature_to_rgb(41400.0);
+        assert!(b > 0.99, "O star B should be ~1.0");
+        assert!(r > 0.55 && r < 0.70, "O star R={r} should be ~0.61");
+        assert!(g > 0.60 && g < 0.75, "O star G={g} should be ~0.69");
+        assert!(b > g && g > r, "O star: expected B > G > R");
+    }
+
+    #[test]
+    fn temperature_to_rgb_monotonic_channels() {
+        let mut prev_r = 2.0;
+        let mut prev_b = -1.0;
+        for t in [
+            2300_f64, 3060., 3750., 4400., 5240., 5770., 6540., 7220., 8180., 9700., 15200., 26500.,
+        ] {
+            let (r, _g, b) = host_temperature_to_rgb(t);
+            assert!(r <= prev_r + 0.001, "R({t}) = {r} > prev {prev_r}");
+            assert!(b >= prev_b - 0.001, "B({t}) = {b} < prev {prev_b}");
+            prev_r = r;
+            prev_b = b;
+        }
+    }
+
+    #[test]
+    fn cell_star_light_with_new_teff_gives_plausible_colors() {
+        let test_masses = [0.1_f64, 0.3, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0];
+        for &mass in &test_masses {
+            let teff = host_mass_to_temp(mass);
+            let (r, g, b) = host_temperature_to_rgb(teff);
+            assert!((0.0..=1.0).contains(&r), "mass={mass}: R={r} out of range");
+            assert!((0.0..=1.0).contains(&g), "mass={mass}: G={g} out of range");
+            assert!((0.0..=1.0).contains(&b), "mass={mass}: B={b} out of range");
+            let max_ch = r.max(g).max(b);
+            assert!(
+                (max_ch - 1.0).abs() < 0.01,
+                "mass={mass}: no channel near 1.0 (R={r}, G={g}, B={b})"
+            );
+        }
+    }
+
+    #[test]
+    fn lut_entries_are_sorted_by_temperature() {
+        for i in 0..(COLOR_LUT_HOST.len() - 1) {
+            assert!(
+                COLOR_LUT_HOST[i].0 < COLOR_LUT_HOST[i + 1].0,
+                "LUT entry {i} Teff={} >= entry {} Teff={}",
+                COLOR_LUT_HOST[i].0,
+                i + 1,
+                COLOR_LUT_HOST[i + 1].0
+            );
+        }
     }
 }

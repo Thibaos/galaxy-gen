@@ -17,7 +17,7 @@ before starting, honor its STOP conditions, and update your row when done.
 | 007  | Add interactive GUI with egui                         | P1       | L      | —          | DONE ✅ (2026-06-16) |
 | 008  | Fix spiral arm formula to logarithmic spiral          | P1       | M      | —          | DONE ✅ (2026-06-22) |
 | 009  | Remove dead shader functions                          | P2       | S      | —          | DONE ✅ (2026-06-22) |
-| 010  | Physical star colors via spectrum-based LUT           | P1       | M      | —          | TODO   |
+| 010  | Physical star colors via spectrum-based LUT           | P1       | M      | —          | DONE ✅ (2026-06-23) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale)
 
