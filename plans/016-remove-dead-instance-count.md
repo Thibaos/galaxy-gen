@@ -7,14 +7,15 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/gpu.rs src/main.rs`
-> If `GpuStars` struct or `instance_count` usage changed since this plan was
-> written, treat it as a STOP condition.
+> `git diff --stat 1647567..HEAD -- src/gpu.rs`
+> If `GpuStars` struct changed since this plan was written, treat it as a
+> STOP condition.
 
 ## Status
 
 - **Priority**: P3
 - **Effort**: S
+- **Risk**: LOW
 - **Category**: tech debt
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -74,28 +75,37 @@ No reads. No writes. The draw call in `main.rs` uses
 
 ## Steps
 
-### Step 1: Remove the field
+### Step 1: Remove the field + initialization
 
-In `src/gpu.rs`, delete the `pub instance_count: u32,` line from the
-`GpuStars` struct.
+In `src/gpu.rs`, make two deletions:
 
-### Step 2: Remove initialization
+**Struct** (~line 405): delete `pub instance_count: u32,` from `GpuStars`.
 
-In `GpuStars::new()`, delete the `instance_count: 0,` line from the
-`Self { ... }` literal.
+**Constructor** (~line 573): delete `instance_count: 0,` from the
+`Self { ... }` literal in `GpuStars::new`.
 
-### Step 3: Validate
+**Verify**: `cargo check` → exit 0
+
+### Step 2: Full validation
 
 ```bash
-cargo check
 cargo clippy -- -D warnings
 cargo test
+rg "instance_count" src/  # must return zero results
 ```
+
+All 45 tests pass. No warnings.
+
+## Git workflow
+
+- Branch: `advisor/016-remove-dead-instance-count`
+- Commit message: `chore: remove dead instance_count field from GpuStars`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
 - All 45 existing tests pass (no behavioral change — field was never used)
-- `rg "instance_count"` returns zero results
+- `rg "instance_count"` returns zero results in src/
 
 ## Done criteria
 
@@ -107,5 +117,14 @@ cargo test
 
 ## STOP conditions
 
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Any compilation error
 - Any existing test fails
+
+## Maintenance notes
+
+- If `instance_count` is ever needed in the future (e.g. for buffer
+  validation), use `star_catalogue.len()` at the call site instead of
+  caching it in a struct field — this avoids the stale-data class of bugs
+  that caused this field to be dead in the first place.

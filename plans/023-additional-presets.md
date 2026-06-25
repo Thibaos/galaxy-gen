@@ -7,14 +7,15 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/galaxy.rs galaxies/`
-> If `GalaxyParams` struct or existing presets changed since this plan was
-> written, treat it as a STOP condition.
+> `git diff --stat 1647567..HEAD -- src/galaxy.rs src/main.rs src/gpu.rs`
+> If `GalaxyParams` struct, existing presets, or the egui dropdown changed
+> since this plan was written, treat it as a STOP condition.
 
 ## Status
 
 - **Priority**: P3
 - **Effort**: M per preset (this plan: 3 presets = 1-2 hours total)
+- **Risk**: LOW (content-only, no logic changes)
 - **Category**: direction (content)
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -90,6 +91,73 @@ measurements, sources, and derived values to `galaxies/<target>.toml`."
 | Pitch angle | ~25° | Kennicutt+1981 |
 | H I disk | Extends to ~50 kpc | Walter+2008 |
 
+## Current state
+
+Key patterns the executor must match:
+
+**Existing constructor** — `src/galaxy.rs`, `fn milky_way()`:
+```rust
+impl GalaxyParams {
+    pub fn milky_way() -> Self {
+        Self {
+            disk_scale_length: ...,
+            disk_scale_height: ...,
+            disk_central_density: ...,
+            arm_count: ...,
+            arm_pitch_angle_deg: ...,
+            arm_concentration: ...,
+            arm_strength: ...,
+            bulge_radius: ...,
+            bulge_central_density: ...,
+            halo_radius: ...,
+            halo_central_density: ...,
+            halo_slope: ...,
+        }
+    }
+}
+```
+New constructors copy this structure with different values from the
+reference data tables above.
+
+**GalaxyPreset enum** — `src/galaxy.rs`:
+```rust
+pub enum GalaxyPreset { MilkyWay, Ngc628 }
+impl GalaxyPreset {
+    pub fn to_params(&self) -> GalaxyParams {
+        match self {
+            Self::MilkyWay => GalaxyParams::milky_way(),
+            Self::Ngc628 => GalaxyParams::ngc628(),
+        }
+    }
+}
+```
+Add `M31`, `M51`, `M101` variants and match arms.
+
+**Existing column profile test** — `src/gpu.rs` test module:
+```rust
+#[test]
+fn milky_way_disk_column_exponential() {
+    let params = GalaxyParams::milky_way();
+    let hr = params.disk_scale_length;
+    let sigma_0 = /* column density at r=0 */;
+    let sigma_hr = /* column density at r=hr */;
+    let ratio = sigma_hr / sigma_0;
+    let expected = 1.0 / std::f64::consts::E;
+    assert!((ratio - expected).abs() < 0.05);
+}
+```
+New tests follow this pattern, validating Σ(hr)/Σ(0) ≈ 1/e and Σ(a)/Σ(0) ≈ ¼.
+
+**Egui dropdown** — `src/main.rs` (search for `GalaxyPreset::`):
+```rust
+egui::ComboBox::from_label("Preset")
+    .selected_text(format!("{:?}", self.current_preset))
+    .show_ui(ui, |ui| {
+        ui.selectable_value(&mut self.current_preset, GalaxyPreset::MilkyWay, "Milky Way");
+        ui.selectable_value(&mut self.current_preset, GalaxyPreset::Ngc628, "NGC 628 (M74)");
+    });
+```
+
 ## Commands
 
 | Purpose | Command                        | Expected              |
@@ -110,80 +178,102 @@ measurements, sources, and derived values to `galaxies/<target>.toml`."
 
 ## Steps
 
-### Step 1: Research and document
+### Step 1: Create TOML reference files
 
-Create `galaxies/m31.toml`, `galaxies/m51.toml`, `galaxies/m101.toml` with
-all physical parameters, sources, derived values, and uncertainty notes.
-Follow the format of `galaxies/milky_way.toml` and `galaxies/ngc628.toml`.
+Create three files using the reference data in the "Reference data" section
+above (no web search needed — all parameters are already sourced). Follow
+the format of existing TOML files. Read an existing one as a template:
 
-Use web search to fill in missing values (especially B/T ratios and
-bulge radii) from recent literature (2010+).
-
-### Step 2: Add M31 preset
-
-In `src/galaxy.rs`, add:
-
-```rust
-impl GalaxyParams {
-    /// M31 (Andromeda Galaxy)
-    ///
-    /// ... documented comment block with physical parameters ...
-    pub fn m31() -> Self { ... }
-}
+```bash
+cat galaxies/milky_way.toml
 ```
 
-Derive `disk_central_density` and `bulge_central_density` from stellar mass
-and B/T ratio. Follow the methodology in the existing presets.
+Create: `galaxies/m31.toml`, `galaxies/m51.toml`, `galaxies/m101.toml`.
+Each must include: name, distance, stellar_mass, disk_scale_length,
+disk_scale_height (note hz/hr estimation uncertainty), bulge_radius,
+bulge_to_total, inclination, arm_count, pitch_angle.
+
+**Verify**: `ls galaxies/m31.toml galaxies/m51.toml galaxies/m101.toml` → all exist
+
+### Step 2: Add M31 constructor
+
+In `src/galaxy.rs`, add a `GalaxyParams::m31()` constructor. Follow the
+pattern of the existing `milky_way()` constructor — read it first:
+
+```bash
+grep -A 30 "fn milky_way" src/galaxy.rs
+```
+
+The methodology for deriving `disk_central_density` and `bulge_central_density`:
+
+1. `disk_central_density` ≈ stellar_mass × (1 − B/T) / (2π × scale_length² × scale_height)
+   This normalizes the sech²(z/hz) × exp(−r/hr) profile to the disk mass.
+2. `bulge_central_density` ≈ stellar_mass × B/T × (3/4π) × effective_radius⁻³
+   This normalizes the Plummer profile (ρ(r) ∝ (1 + r²/a²)^(−5/2)) to the bulge mass.
+   The factor (3/4π) comes from ∫ ρ(r) dV = M_bulge solved for ρ₀.
+
+Add `GalaxyPreset::M31` enum variant. Add doc comment block with physical
+parameters and sources.
 
 ### Step 3: Add column profile tests for M31
 
-In `src/gpu.rs` tests:
+In `src/gpu.rs` tests, read the existing pattern first:
 
-```rust
-#[test]
-fn m31_disk_column_exponential() { ... }
-#[test]
-fn m31_bulge_column_plummer() { ... }
+```bash
+grep -A 25 "fn milky_way_disk_column_exponential" src/gpu.rs
 ```
 
-Same pattern as milky_way and ngc628 tests.
+Add two tests following the same pattern: `m31_disk_column_exponential`
+and `m31_bulge_column_plummer`. Validation: Σ(hr)/Σ(0) ≈ 1/e for disk;
+Σ(a)/Σ(0) ≈ ¼ for Plummer bulge; bulge central density consistent with
+bulge flux fraction from B/T.
+
+**Verify**: `cargo test m31_disk m31_bulge` → both pass
 
 ### Step 4: Add M51 preset + tests
 
-Repeat steps 2-3 for M51. The high pitch angle (~21°) and strong arms
-make this an interesting validation case — verify arm modulation produces
-visually distinct spiral structure in the column density profile.
+Repeat steps 2-3 for M51 using the reference data table. The high pitch
+angle (~21°) and strong arms validate the logarithmic spiral formula.
+
+**Verify**: `cargo test m51` → new tests pass; `cargo check` → exit 0
 
 ### Step 5: Add M101 preset + tests
 
 Repeat steps 2-3 for M101. The large scale length (~16 kLY) pushes the
-disc_radius calculation in `generate_star_catalogue` — verify the 8×
-scale length doesn't exceed the 80,000 LY cap.
+disc_radius calculation in `generate_star_catalogue` — the 8× scale length
+(128 kLY) exceeds the 80,000 LY clamp. This is acceptable: density at 80k
+LY is exp(−80/16) ≈ 0.7% of central, effectively invisible. Note this
+in `galaxies/m101.toml`.
 
-### Step 6: Add to egui dropdown
+**Verify**: `cargo test m101` → new tests pass; `cargo check` → exit 0
 
-In `src/main.rs`, add the three new presets to the egui `ComboBox`:
+### Step 6: Add to egui dropdown + GalaxyPreset enum
 
-```rust
-egui::ComboBox::from_label("Preset")
-    .selected_text(...)
-    .show_ui(ui, |ui| {
-        ui.selectable_value(&mut ..., GalaxyPreset::MilkyWay, "Milky Way");
-        ui.selectable_value(&mut ..., GalaxyPreset::Ngc628, "NGC 628 (M74)");
-        ui.selectable_value(&mut ..., GalaxyPreset::M31, "M31 (Andromeda)");
-        ui.selectable_value(&mut ..., GalaxyPreset::M51, "M51 (Whirlpool)");
-        ui.selectable_value(&mut ..., GalaxyPreset::M101, "M101 (Pinwheel)");
-    });
-```
+In `src/main.rs`, find the existing egui preset `ComboBox`. Search for
+`GalaxyPreset::` to locate it. Add three new `ui.selectable_value(...)`
+entries alongside the existing MilkyWay and Ngc628 entries.
 
-Add the enum variants to `GalaxyPreset`.
+In `src/galaxy.rs`, add `M31`, `M51`, `M101` variants to the `GalaxyPreset`
+enum and update the `impl GalaxyPreset` block that maps enum variants to
+`GalaxyParams` constructors.
+
+**Verify**: `cargo check` → exit 0; drop-down compiles
 
 ### Step 7: Full validation
 
 ```bash
 cargo clippy -- -D warnings
-cargo test
+cargo test  # all existing + new column profile tests pass
 ```
+
+Manual smoke: switch to each new preset, verify 2D and 3D rendering
+produce visually distinct galaxies.
+
+## Git workflow
+
+- Branch: `advisor/023-additional-presets`
+- Commit message: `feat: add M31, M51, M101 galaxy presets`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -207,7 +297,9 @@ cargo test
 
 ## STOP conditions
 
-- Unable to find reliable B/T ratio or bulge radius for any target
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
+- If `fn milky_way()` or `GalaxyPreset` enum doesn't exist, STOP.
 - Derived `disk_central_density` produces NaN or negative values
 - Column density tests fail to converge (exponential/Plummer profiles don't
   match derived parameters)

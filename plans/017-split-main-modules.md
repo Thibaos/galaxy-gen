@@ -7,7 +7,7 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/main.rs`
+> `git diff --stat 1647567..HEAD -- src/main.rs`
 > If `main.rs` changed substantially (>50 lines) since this plan was written,
 > treat it as a STOP condition.
 
@@ -15,9 +15,11 @@
 
 - **Priority**: P2
 - **Effort**: L
+- **Risk**: MEDIUM
 - **Category**: tech debt
-- **Depends on**: 013, 014, 015 (all small modifications to main.rs — execute
-  them first to avoid conflict)
+- **Depends on**: 013, 014, 015 recommended (execute them first to avoid
+  merge conflicts); this plan CAN be executed standalone if 013/014/015
+  are not yet done — just expect slightly different line numbers
 - **Planned at**: commit `1647567`, 2026-06-25
 
 ## Why this matters
@@ -49,6 +51,50 @@ All in `src/main.rs`:
 | Snapshot export      | 450–480        | `snapshot.rs`   |
 | Star catalogue       | 400–445        | `app.rs` (small fn) |
 | winit event loop     | 1085–1114      | `main.rs`       |
+
+Key code blocks being moved (current excerpts):
+
+**`camera_position()`** — a free function or method computing
+`glam::Mat4::look_at_rh(...)` from azimuth/elevation/distance:
+```rust
+fn camera_position(azimuth: f32, elevation: f32, dist: f32, target: Vec3) -> (Vec3, Vec3) {
+    let pos = target + Vec3::new(
+        azimuth.cos() * elevation.cos() * dist,
+        elevation.sin() * dist,
+        azimuth.sin() * elevation.cos() * dist,
+    );
+    let forward = (target - pos).normalize();
+    (pos, forward)
+}
+```
+
+**`save_snapshot()`** — current method on `App` (~line 450), maps GPU buffer
+to CPU, writes PNG via `image` crate:
+```rust
+pub fn save_snapshot(&self, path: &std::path::Path) {
+    // maps self.rgba_buffer, reads pixel data,
+    // constructs image::RgbaImage, calls .save(path)
+}
+```
+
+**`redraw()`** — currently an `impl App` method (~100 lines). Accesses
+`self` fields for device, queue, surface, config, window, display_tex,
+gpu_compute, uniform_buffer, rgba_buffer, render_w, render_h, needs_render,
+render_mode, show_glow, show_stars, gpu_stars, star_catalogue, egui_state,
+egui_renderer, egui_context, frame_count, and snapshot path.
+During extraction, convert to a free function taking `app: &mut App` plus
+any externally-owned resources (device, queue, surface, config, window).
+Within the body, replace `self.` with `app.` and `&self.` with `&app.`.
+
+**App struct camera fields** — the individual fields being collapsed:
+```rust
+camera_dist: f32,
+camera_azimuth: f32,
+camera_elevation: f32,
+camera_target: glam::Vec3,
+camera_fov: f32,
+```
+These five become a single `camera: Camera` field.
 
 ## Commands
 
@@ -187,47 +233,89 @@ All must pass before beginning.
 
 ### Step 1: Extract `camera.rs`
 
-Create `src/camera.rs` with the `Camera` struct and methods. Move
-`camera_position()` logic from `App` impl into `Camera::position()`.
+Create `src/camera.rs` with:
 
-Update `App` to hold a `camera: Camera` field instead of individual
-`camera_*` fields. Update all call sites.
+```rust
+pub struct Camera {
+    pub dist: f32,
+    pub azimuth: f32,
+    pub elevation: f32,
+    pub target: glam::Vec3,
+    pub fov_y_deg: f32,
+}
 
-**Verify**: `cargo check`
+impl Camera {
+    pub fn position(&self) -> glam::Vec3 { ... }
+    pub fn forward(&self) -> glam::Vec3 { ... }
+    pub fn orbit(&mut self, d_azimuth: f32, d_elevation: f32) { ... }
+    pub fn zoom(&mut self, factor: f32) { ... }
+}
+```
+
+Move the existing `camera_position()` free function body into these methods.
+Replace individual `camera_dist`, `camera_azimuth`, `camera_elevation`,
+`camera_target`, `camera_fov` fields on `App` with a single `camera: Camera`
+field. Update every reference to `self.camera_*` to `self.camera.*`.
+Start with `App::new()` and `redraw()`; compiler errors will guide you to
+remaining call sites.
+
+**Verify**: `cargo check` → exit 0
 
 ### Step 2: Extract `snapshot.rs`
 
-Move `save_snapshot()` from `App` impl to a free function in `snapshot.rs`.
-Takes `&App` (or the needed fields) + output path.
+Create `src/snapshot.rs`. Move the `save_snapshot()` method body to a
+free function:
 
-**Verify**: `cargo check`
+```rust
+pub fn save_snapshot(rgba_buffer: &wgpu::Buffer, device: &wgpu::Device,
+    queue: &wgpu::Queue, width: u32, height: u32, path: &std::path::Path)
+```
+
+Remove `save_snapshot` from `impl App`. Update the caller in the egui
+sidebar button handler to pass `self.rgba_buffer`, `self.device`, etc.
+
+**Verify**: `cargo check` → exit 0
 
 ### Step 3: Extract `ui.rs`
 
-Move the entire egui sidebar construction block (~lines 830-1090) into
-`ui::build_sidebar(&mut egui::Ui, ...)`. This is the largest single block.
+Create `src/ui.rs`. Move the entire egui sidebar construction block
+(~lines 830–1090) into:
 
-At this point `main.rs` should be ~600 lines with only the render loop
-and input handling left.
+```rust
+pub fn build_sidebar(ui: &mut egui::Ui, app: &mut App) -> bool
+```
 
-**Verify**: `cargo check`
+Returns `true` if any control changed (→ set `needs_render`). The function
+references app fields like `params`, `render_mode`, `show_stars`, all
+sliders/toggles/buttons. Cut the block whole and replace with a call.
+
+After this step, `main.rs` should be ~600 lines.
+
+**Verify**: `cargo check` → exit 0
 
 ### Step 4: Extract `input.rs`
 
-Move input event handling (`WindowEvent` match arms for mouse, keyboard,
-modifiers, scroll, cursor moved) into `input::handle_window_event()`.
+Create `src/input.rs`. Move mouse/keyboard/scroll/cursor event handling
+from the `WindowEvent` match arms into:
 
-**Verify**: `cargo check`
+```rust
+pub struct InputState { pub mouse_x: f64, pub mouse_y: f64, ... }
+pub fn handle_window_event(event: &WindowEvent, app: &mut App,
+    input: &mut InputState, egui_ctx: &egui::Context)
+```
+
+The app event loop calls this function, which mutates `app` state
+(camera angles, needs_render, etc.).
+
+**Verify**: `cargo check` → exit 0
 
 ### Step 5: Extract `render.rs`
 
-Move the `redraw()` function into `render.rs`. This is the final large
-extraction.
+Create `src/render.rs`. Move the `redraw()` function into it. This is the
+final extraction. After this, `main.rs` is ~30–50 lines: `fn main()`,
+winit event loop bootstrap, and delegation to modules.
 
-After this step, `main.rs` should be ~30-50 lines: `fn main()`, winit
-event loop setup, and delegation to `app`, `input`, `render`, `ui` modules.
-
-**Verify**: `cargo check`
+**Verify**: `cargo check` → exit 0
 
 ### Step 6: Full validation
 
@@ -236,7 +324,13 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
-Fix any warnings. All 45 tests must pass.
+Fix any warnings. All 45 tests must pass. `wc -l src/main.rs` < 100.
+
+## Git workflow
+
+- Branch: `advisor/017-split-main-modules`
+- Commit message: `refactor: split main.rs into modules`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -257,7 +351,21 @@ Fix any warnings. All 45 tests must pass.
 
 ## STOP conditions
 
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Any compilation error that can't be resolved by adding `pub` visibility
 - Cyclic module dependency (e.g. `render.rs` importing `ui.rs` and vice versa)
 - Any existing test fails
 - Manual test reveals rendering regression
+
+## Maintenance notes
+
+- After the split, `src/main.rs` is the bootstrapper only. Any new feature
+  should be scoped to the appropriate module: camera math → `camera.rs`,
+  UI controls → `ui.rs`, input → `input.rs`, rendering → `render.rs`.
+- The `App` struct remains in `app.rs` as the single source of truth.
+  Resist the temptation to split it further unless a clear bounded
+  sub-struct emerges (e.g. `RenderState`).
+- If plans 013/014/015 were executed before this one, line numbers in
+  `main.rs` may differ from the excerpts. The function signatures and
+  names are the stable references.

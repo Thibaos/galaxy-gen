@@ -7,14 +7,15 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/main.rs src/gpu.rs`
-> If the star catalogue upload logic or `GpuStars` struct changed since this
-> plan was written, treat it as a STOP condition.
+> `git diff --stat 1647567..HEAD -- src/main.rs`
+> If the star catalogue upload logic or `ensure_star_catalogue` changed
+> since this plan was written, treat it as a STOP condition.
 
 ## Status
 
 - **Priority**: P2
 - **Effort**: S
+- **Risk**: LOW
 - **Category**: performance
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -37,13 +38,25 @@ the catalogue is regenerated; set it to `true` after the upload. Skip the
 
 ## Current state
 
-**Relevant code**: `src/main.rs:779-786` (inside `redraw()`, after the
-compute dispatch):
+**Relevant code** — `src/main.rs`:
 
+1. **Catalogue generation** (~line 415 in `ensure_star_catalogue()`):
+```rust
+fn ensure_star_catalogue(&mut self) {
+    if self.star_catalogue_dirty || self.star_catalogue.is_empty() {
+        self.star_catalogue = gpu::generate_star_catalogue(&self.params, gpu::MAX_STARS);
+        self.star_catalogue_dirty = false;
+    }
+}
+```
+
+2. **Upload block** (~line 779 in `redraw()`, after the compute dispatch):
 ```rust
 if self.render_mode == 1 && self.show_stars && !self.star_catalogue.is_empty() {
     let gpu_stars = self.gpu_stars.as_ref().unwrap();
     self.write_view_proj_matrix(queue, gpu_stars);
+    let count = self.star_catalogue.len() as u32;
+    let max = gpu::MAX_STARS as u32;
     queue.write_buffer(&gpu_stars.instance_buffer, 0, bytemuck::cast_slice(&[count, max]));
     queue.write_buffer(&gpu_stars.instance_buffer, 8, bytemuck::cast_slice(&self.star_catalogue));
     let mut rpass = encoder.begin_render_pass(...);
@@ -80,8 +93,8 @@ calls) only needs to update when the catalogue changes.
 
 ### Step 1: Add flag to `App` struct
 
-In `src/main.rs`, add to the `App` struct (near the other star-related
-fields):
+In `src/main.rs`, add to the `App` struct (near `star_catalogue_dirty` and
+other star-related fields):
 
 ```rust
 star_catalogue_uploaded: bool,
@@ -93,23 +106,42 @@ Initialize in `App::new()`:
 star_catalogue_uploaded: false,
 ```
 
+**Verify**: `cargo check` → exit 0 (field compiles, defaults correctly)
+
 ### Step 2: Set flag in `ensure_star_catalogue`
 
-In `ensure_star_catalogue()`, after the line that assigns
-`self.star_catalogue = gpu::generate_star_catalogue(...)`, add:
+In `ensure_star_catalogue()` (~line 415), locate the block where the
+catalogue is generated. After the `self.star_catalogue = ...` assignment
+(*inside* the `if` block, right after it), add:
 
 ```rust
 self.star_catalogue_uploaded = false;
 ```
 
+The resulting block looks like:
+
+```rust
+if self.star_catalogue_dirty || self.star_catalogue.is_empty() {
+    self.star_catalogue = gpu::generate_star_catalogue(&self.params, gpu::MAX_STARS);
+    self.star_catalogue_dirty = false;
+    self.star_catalogue_uploaded = false;
+}
+```
+
 This ensures any catalogue regeneration triggers a re-upload.
+
+**Verify**: `cargo check` → exit 0 (method compiles, flag used)
 
 ### Step 3: Guard instance buffer uploads
 
-In `redraw()`, wrap the two instance `write_buffer` calls:
+In `redraw()`, locate the star upload block (~line 779). Move the `count`
+and `max` definitions inside the new guard along with the two
+`write_buffer` calls:
 
 **Before:**
 ```rust
+let count = self.star_catalogue.len() as u32;
+let max = gpu::MAX_STARS as u32;
 queue.write_buffer(&gpu_stars.instance_buffer, 0, bytemuck::cast_slice(&[count, max]));
 queue.write_buffer(&gpu_stars.instance_buffer, 8, bytemuck::cast_slice(&self.star_catalogue));
 ```
@@ -117,33 +149,50 @@ queue.write_buffer(&gpu_stars.instance_buffer, 8, bytemuck::cast_slice(&self.sta
 **After:**
 ```rust
 if !self.star_catalogue_uploaded {
+    let count = self.star_catalogue.len() as u32;
+    let max = gpu::MAX_STARS as u32;
     queue.write_buffer(&gpu_stars.instance_buffer, 0, bytemuck::cast_slice(&[count, max]));
     queue.write_buffer(&gpu_stars.instance_buffer, 8, bytemuck::cast_slice(&self.star_catalogue));
     self.star_catalogue_uploaded = true;
 }
 ```
 
-Keep `write_view_proj_matrix` BEFORE this block (it always runs) and the
-draw call after.
+Keep `write_view_proj_matrix` BEFORE this block (it always runs — camera
+moves every frame) and the draw call after.
+
+**Verify**: `cargo check` → exit 0 (guard compiles, `count`/`max` correctly scoped)
 
 ### Step 4: Show flag in egui debug
 
-Add a line in the egui sidebar (e.g. near the star controls):
+In the egui sidebar, near the star controls (Show Stars toggle, Star
+brightness, Star size), add a debug label:
 
 ```rust
 ui.label(format!("Catalogue: {} stars {}", self.star_catalogue.len(),
     if self.star_catalogue_uploaded { "(synced)" } else { "(dirty)" }));
 ```
 
-This is useful for verifying the optimization works during development.
+This label can be kept permanently (single line, useful for debugging) or
+removed after validation — your choice.
 
-### Step 5: Validate
+**Verify**: `cargo check` → exit 0 (egui label compiles)
+
+### Step 5: Full validation
 
 ```bash
 cargo check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+All 45 tests must pass. Fix any warnings before declaring done.
+
+## Git workflow
+
+- Branch: `advisor/014-star-catalogue-on-dirty`
+- Commit message: `perf: upload star catalogue only when dirty`
+  (repo uses conventional-ish prefixes: `perf:`, `fix:`, `feat:`, `docs:`)
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -166,6 +215,20 @@ cargo test
 
 ## STOP conditions
 
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Star rendering breaks (stars disappear or jitter) after guard addition
 - Preset switch doesn't update star field
 - Any existing test fails
+
+## Maintenance notes
+
+- Toggling `show_stars` off then on does NOT trigger a re-upload — the
+  catalogue is unchanged. This is correct behavior; the stars are still
+  in GPU memory.
+- The debug label in the egui sidebar can be removed later if you decide
+  the optimization is proven stable. Until then, it serves as a live
+  invariant check.
+- If a future feature allows per-star property changes (e.g. star color
+  variation driven by a slider), the uploaded flag must be set to `false`
+  alongside `star_catalogue_dirty` to trigger re-upload.

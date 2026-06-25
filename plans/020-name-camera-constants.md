@@ -7,7 +7,7 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/main.rs`
+> `git diff --stat 1647567..HEAD -- src/main.rs`
 > If camera constants or orbit logic changed since this plan was written,
 > treat it as a STOP condition.
 
@@ -15,6 +15,7 @@
 
 - **Priority**: P3
 - **Effort**: S
+- **Risk**: LOW
 - **Category**: tech debt
 - **Depends on**: 017 (if executed after the module split, constants should
   go in `camera.rs` instead of `main.rs`)
@@ -37,6 +38,34 @@ comments explaining their origin:
 Without named constants, adjusting these values requires hunting through
 the codebase, and their interrelationships (e.g. orbit sensitivity ×
 camera distance = angular velocity) are invisible.
+
+## Current state
+
+Representative code where magic numbers appear — `src/main.rs`:
+
+**Orbit sensitivity** in the `CursorMoved` handler:
+```rust
+self.camera_azimuth -= dx as f32 * 0.005;
+self.camera_elevation = (self.camera_elevation + dy as f32 * 0.005)
+    .clamp(0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+```
+
+**Near/far planes and up-parallel guard** in `write_view_proj_matrix`:
+```rust
+let proj = glam::Mat4::perspective_rh(
+    self.camera_fov.to_radians(), aspect, 100.0, 1_000_000.0
+);
+// ...
+if dir.dot(up).abs() > 0.9999 {
+    up = glam::Vec3::Z;
+}
+```
+
+**Zoom and distance clamp** in the scroll handler:
+```rust
+let factor = if scroll > 0.0 { 1.0 / 1.15 } else { 1.15 };
+self.camera_dist = (self.camera_dist * factor).clamp(5_000.0, 500_000.0);
+```
 
 ## Commands
 
@@ -105,25 +134,38 @@ const FOV_DEFAULT: f32 = 45.0;
 
 ### Step 2: Replace magic numbers
 
-Search for each numeric literal in the camera/orbit/zoom code and replace
-with the named constant. Key locations:
+In `src/main.rs` (or `src/camera.rs` if plan 017 was already executed),
+replace each literal with its named constant. The locations to search:
 
-- `self.camera_azimuth -= dx as f32 * ORBIT_SENSITIVITY;`
-- `self.camera_elevation = (...).clamp(ELEVATION_MIN, ELEVATION_MAX);`
-- `if dir.dot(up).abs() > UP_PARALLEL_THRESHOLD { ... }`
-- `let factor = if scroll > 0.0 { 1.0 / ZOOM_SPEED } else { ZOOM_SPEED };`
-- `.clamp(CAMERA_DIST_MIN, CAMERA_DIST_MAX)`
-- Default initialization values
+| Literal | Replace with | Lines to check |
+|---------|-------------|----------------|
+| `0.005` (orbit sensitivity) | `ORBIT_SENSITIVITY` | CursorMoved handler, `camera_azimuth` update |
+| `100.0` (near plane) | `CAMERA_NEAR` | `write_view_proj_matrix` |
+| `1_000_000.0` (far plane) | `CAMERA_FAR` | `write_view_proj_matrix` |
+| `0.9999` (parallel threshold) | `UP_PARALLEL_THRESHOLD` | `write_view_proj_matrix`, `dir.dot(up).abs()` guard |
+| `0.01` (clamp offset) | `ELEVATION_MIN`, `ELEVATION_MAX` | elevation `.clamp()` calls |
+| `FRAC_PI_2 - 0.01` | `ELEVATION_MAX` | elevation `.clamp()` calls |
+| `1.15` (zoom per notch) | `ZOOM_SPEED` | scroll handler |
+| `5_000.0` (min dist) / `500_000.0` (max dist) | `CAMERA_DIST_MIN`, `CAMERA_DIST_MAX` | dist `.clamp()` calls |
+| `100_000.0` (default dist) | `CAMERA_DIST_DEFAULT` | `App::new()` camera init |
+| `45.0` (default FOV) | `FOV_DEFAULT` | `App::new()` camera init |
 
-Also update the `write_view_proj_matrix` near/far planes.
+**Verify**: `cargo check` → exit 0
 
-### Step 3: Validate
+### Step 3: Full validation
 
 ```bash
-cargo check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+All 45 tests pass. No warnings.
+
+## Git workflow
+
+- Branch: `advisor/020-name-camera-constants`
+- Commit message: `refactor: name camera and orbit magic numbers`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -142,5 +184,16 @@ cargo test
 
 ## STOP conditions
 
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Any behavioral change in camera/orbit/zoom (different feel after rename)
 - Any existing test fails
+
+## Maintenance notes
+
+- These constants are pure value-preserving renames. If the precision of
+  any constant changes (e.g. `ORBIT_SENSITIVITY` from 0.005 to 0.004),
+  that's a behavioral change — treat it as a separate plan.
+- If plan 017 (module split) was executed first, these constants live in
+  `src/camera.rs`. If not, they live in `src/main.rs`. Both paths produce
+  identical behavior.

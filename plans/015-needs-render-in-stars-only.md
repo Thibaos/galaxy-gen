@@ -7,7 +7,7 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/main.rs`
+> `git diff --stat 1647567..HEAD -- src/main.rs`
 > If the `needs_render` logic or the `do_compute` guard changed since this
 > plan was written, treat it as a STOP condition.
 
@@ -15,6 +15,7 @@
 
 - **Priority**: P2
 - **Effort**: S
+- **Risk**: LOW
 - **Category**: correctness
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -37,18 +38,29 @@ laptops.
 
 ## Current state
 
-**Relevant code**: `src/main.rs:745-768`:
+**Relevant code** — `src/main.rs`:
 
+1. **The `do_compute` guard and clearance** (~line 745):
 ```rust
-let do_compute = render_mode != 1 || show_glow;
+let do_compute = self.render_mode != 1 || self.show_glow;
 
-// ... buffer writes and bind group check ...
+// ... uniform buffer write, bind group check ...
 
 if self.needs_render && do_compute {
     // ... compute dispatch ...
     self.needs_render = false;  // <-- ONLY clearance point
 }
 ```
+
+2. **The star upload and encoder submission** (~line 779, after compute block):
+```rust
+// ... star catalogue upload, view-proj write, instanced draw ...
+
+queue.submit(Some(encoder.finish()));
+presentation
+```
+There is exactly ONE `queue.submit` call in `redraw()`. The unconditional
+clearance will go right before or after it.
 
 ## Commands
 
@@ -66,55 +78,53 @@ if self.needs_render && do_compute {
 
 ## Steps
 
-### Step 1: Extract `needs_render` clearance
+### Step 1: Move `needs_render` clearance to after all rendering
 
-The simplest correct fix: add `self.needs_render = false;` at the END of the
-redraw path, after ALL rendering work is complete. The compute block's
-internal `needs_render = false` becomes redundant and can be removed, or we
-keep both and clear unconditionally after.
+In `src/main.rs`, make two changes:
 
-**Option A (recommended — simplest, least risk):**
+**A) Remove clearance from inside the compute guard** (~line 767). Delete:
+```rust
+self.needs_render = false;
+```
+from inside the `if self.needs_render && do_compute { ... }` block.
 
-At the very end of the render logic in `redraw()`, after the encoder is
-submitted, add:
+**B) Add unconditional clearance after all rendering.** Find the
+existing `queue.submit(Some(encoder.finish()));` line (~line 810). Immediately
+after it, add:
 
 ```rust
 self.needs_render = false;
 ```
 
-And remove the `self.needs_render = false;` from inside the
-`if self.needs_render && do_compute` block (line 767).
-
-**Option B (keep guard on compute block)**
-
-If a render is needed but in stars-only mode, still set `needs_render =
-false` after the star render pass completes because the frame WAS rendered.
-
-Either way, after the `queue.submit(Some(encoder.finish()));` call, add:
+The resulting tail of `redraw()` looks like:
 
 ```rust
+queue.submit(Some(encoder.finish()));
 self.needs_render = false;
+}
 ```
 
-This ensures that after ANY frame is rendered (compute + stars, or
-stars-only), the flag is cleared until the next input event sets it again.
+This single clearance covers all modes: 2D compute, 3D compute+stars, and
+3D stars-only. No mode leaves the flag stuck.
 
-### Step 2: Remove redundant clearance inside compute block
+**Verify**: `cargo check` → exit 0 (no errors)
 
-If using Option A, delete line 767:
-```rust
-self.needs_render = false;
-```
-
-This is now redundant since the unconditional clearance at the end handles it.
-
-### Step 3: Validate
+### Step 2: Full validation
 
 ```bash
 cargo check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+All 45 tests must pass. Fix any warnings before declaring done.
+
+## Git workflow
+
+- Branch: `advisor/015-needs-render-stars-only`
+- Commit message: `fix: clear needs_render after every frame in all modes`
+  (repo uses conventional-ish prefixes: `perf:`, `fix:`, `feat:`, `docs:`)
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -135,7 +145,19 @@ cargo test
 
 ## STOP conditions
 
-- 2D rendering stops updating (needs_render somehow not set before compute
-  dispatch)
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Screen goes black after first frame in any mode
 - Any existing test fails
+
+## Maintenance notes
+
+- The invariant is now: `needs_render` is `false` at function return after
+  every single call to `redraw()`. It is `true` only when a new render has
+  been requested and has not yet been serviced. Any future code added to
+  `redraw()` that could skip the `queue.submit` call (e.g. an early return
+  for window minimization) must also clear `needs_render` or risk the same
+  infinite-redraw bug.
+- If a double-buffered or multi-pass rendering pipeline is added later,
+  there should still be exactly one `needs_render = false` — at the point
+  where the frame is confirmed submitted, not per-pass.

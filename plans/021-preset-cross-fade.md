@@ -7,7 +7,7 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/main.rs src/display.wgsl src/gpu.rs`
+> `git diff --stat 1647567..HEAD -- src/main.rs src/display.wgsl src/gpu.rs`
 > If the render pipeline or display shader changed significantly since this
 > plan was written, treat it as a STOP condition.
 
@@ -15,6 +15,7 @@
 
 - **Priority**: P3
 - **Effort**: M
+- **Risk**: MEDIUM
 - **Category**: direction (polish)
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -50,6 +51,49 @@ IDLE ──(preset switch)──► FADING { t: 0.0..1.0 }
   compute new galaxy into `render_tex[current_tex]`, start fade
 - Display shader blends: `mix(prev, current, fade_t)`
 
+## Current state
+
+**Render texture field** on `App` (~line 60):
+```rust
+render_tex: Option<wgpu::Texture>,  // currently a single texture
+```
+This becomes the "current" in the ping-pong pair. `prev_tex` is new.
+
+**Recreate helper** — a free function in `main.rs` that allocates a texture:
+```rust
+fn recreate_texture(device: &wgpu::Device, w: u32, h: u32,
+    format: wgpu::TextureFormat) -> wgpu::Texture { ... }
+```
+The plan reuses this to create the new "current" texture on preset switch.
+
+**Current display shader** — `src/display.wgsl` (full file, ~35 lines):
+```wgsl
+struct VertexOutput { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+@vertex fn vs_main(...) -> VertexOutput { ... }
+@group(0) @binding(0) var tex: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@fragment fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSample(tex, smp, in.uv);
+    return vec4(color.b, color.g, color.r, color.a);  // Bgra8 swap
+}
+```
+Bindings 0 and 1 are taken. New bindings start at 2 (prev texture) and 3 (fade uniform).
+
+**Preset dropdown** — in the egui sidebar (~line 900):
+```rust
+if ui.selectable_value(&mut self.current_preset, GalaxyPreset::MilkyWay, "Milky Way").clicked()
+    || ui.selectable_value(...).clicked()
+{
+    self.params = GalaxyParams::from_preset(self.current_preset);
+    self.star_catalogue_dirty = true;
+    self.needs_render = true;
+}
+```
+The `if preset_changed { ... }` block from step 2 goes inside the `.clicked()`
+branch, after `self.needs_render = true;`. The `render_w`, `render_h`,
+`surface_format`, and `device` variables are available in `redraw()` scope
+via local bindings destructured from `self`.
+
 ## Commands
 
 | Purpose | Command                        | Expected              |
@@ -74,14 +118,23 @@ IDLE ──(preset switch)──► FADING { t: 0.0..1.0 }
 
 ### Step 1: Add cross-fade state to App
 
+Add to `App` struct near `render_tex`:
 ```rust
-fade_t: f32,           // 0.0 = fully prev, 1.0 = fully current
-fade_duration: f32,    // seconds (e.g. 0.8)
+fade_t: f32,
+fade_duration: f32,
 is_fading: bool,
 prev_tex: Option<wgpu::Texture>,
 ```
 
-Initialize `fade_t = 1.0`, `fade_duration = 0.8`, `is_fading = false`.
+In `App::new()`:
+```rust
+fade_t: 1.0,
+fade_duration: 0.8,
+is_fading: false,
+prev_tex: None,
+```
+
+**Verify**: `cargo check` → exit 0
 
 ### Step 2: Trigger fade on preset change
 
@@ -90,14 +143,21 @@ In the egui preset dropdown handler, after switching params + setting
 
 ```rust
 if preset_changed {
-    // Swap textures
-    if let Some(tex) = self.prev_tex.take() { /* drop old */ }
-    self.prev_tex = Some(self.render_tex.take().unwrap());
-    self.render_tex = Some(recreate_texture(device, render_w, render_h, ...));
+    // Swap textures: current becomes previous, create new current
+    let old_render_tex = std::mem::replace(
+        &mut self.render_tex,
+        Some(recreate_texture(device, render_w, render_h, surface_format)),
+    );
+    // Drop the old prev_tex (if any) and move current → prev
+    self.prev_tex = old_render_tex;
     self.is_fading = true;
     self.fade_t = 0.0;
 }
 ```
+
+`std::mem::replace` atomically swaps: new texture goes into `render_tex`,
+old texture is returned and assigned to `prev_tex`. Previous `prev_tex`
+is dropped via `Option` reassignment.
 
 ### Step 3: Advance fade each frame
 
@@ -125,13 +185,10 @@ Add to `display.wgsl`:
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let color_cur = textureSample(tex, smp, in.uv);
-    if fade_t >= 1.0 {
-        // ... existing color processing ...
-    } else {
-        let color_prev = textureSample(tex_prev, smp, in.uv);
-        let color = mix(color_prev, color_cur, fade_t);
-        // ... processing ...
-    }
+    let color_prev = textureSample(tex_prev, smp, in.uv);
+    let color = mix(color_prev, color_cur, fade_t);
+    // Apply R↔B swap (surface format compensation) on the blended result
+    // ... existing color processing ...
 }
 ```
 
@@ -139,18 +196,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 do the blend on the CPU side by rendering into a staging buffer and
 blending there. But that's slower and more complex. Stick with GPU blend.
 
-### Step 5: Wire bindings
+### Step 5: Wire bindings to DisplayPipeline
 
-Add `tex_prev` binding and `fade_t` uniform buffer to the display pipeline's
-bind group layout in `GpuCompute` or the display pipeline setup.
+In `src/main.rs`, update the `DisplayPipeline` struct and initialization:
 
-### Step 6: Validate
+**A)** Add `prev_tex: wgpu::Texture` and `fade_buffer: wgpu::Buffer` fields.
+
+**B)** In the bind group layout, add entries for binding 2 (texture_2d<f32>)
+and binding 3 (uniform buffer, 4 bytes).
+
+**C)** In the bind group, add entries pointing to `prev_tex` (create a
+`textureView` for it) and `fade_buffer`.
+
+**D)** Each frame, write `self.fade_t` to `fade_buffer` via
+`queue.write_buffer(&self.display.fade_buffer, 0, &self.fade_t.to_ne_bytes());`.
+
+**Verify**: `cargo check` → exit 0 (no bind group layout mismatches)
+
+### Step 5B: Write fade_t each frame
+
+In `redraw()`, after the fade advance logic from step 3, write the current
+fade value to the GPU buffer:
+
+```rust
+queue.write_buffer(&self.display.fade_buffer, 0, &self.fade_t.to_ne_bytes());
+```
+
+**Verify**: `cargo check` → exit 0
+
+### Step 6: Full validation
 
 ```bash
-cargo check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+All 45 tests pass. Manual test: switch presets, verify ~0.8s cross-fade.
+
+## Git workflow
+
+- Branch: `advisor/021-preset-cross-fade`
+- Commit message: `feat: cross-fade between presets on switch`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -172,6 +259,8 @@ cargo test
 
 ## STOP conditions
 
+- The code at the locations in "Design" doesn't match the current codebase
+  (the codebase has drifted since this plan was written).
 - Display shader compilation fails (binding count mismatch)
 - Texture allocation fails on low-VRAM devices
 - Flicker or artifacts during fade

@@ -7,14 +7,15 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/gpu.rs`
-> If `compute_galaxy` or `GpuCompute` changed since this plan was written,
-> treat it as a STOP condition.
+> `git diff --stat 1647567..HEAD -- src/gpu.rs src/main.rs`
+> If `compute_galaxy`, `GpuCompute`, or the `rgba_buffer` recreation logic in
+> `redraw()` changed since this plan was written, treat it as a STOP condition.
 
 ## Status
 
 - **Priority**: P2
 - **Effort**: S
+- **Risk**: LOW
 - **Category**: performance
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -63,6 +64,37 @@ whenever `image_w` or `image_h` changes (via `recreate_texture` in
 `main.rs`). On resize, the cached bind group MUST be invalidated and
 recreated with the new `rgba_buffer`.
 
+**Relevant `main.rs` context** — the `redraw()` function destructures `self`
+into local bindings. You'll interact with two regions:
+
+1. **Resize block** (~line 735): where `self.rgba_buffer` is reassigned
+   when dimensions change:
+```rust
+if self.render_w != new_w || self.render_h != new_h {
+    self.render_w = new_w;
+    self.render_h = new_h;
+    self.surface.configure(device, &config);
+    // rgab_buffer is recreated here alongside the display texture
+    self.rgba_buffer = Some(recreate_texture(device, new_w, new_h, ...));
+    ...
+}
+```
+
+2. **Compute dispatch** (~line 760): where `compute_galaxy` is called:
+```rust
+let uniform_data = ...;
+queue.write_buffer(self.uniform_buffer.as_ref().unwrap(), 0, bytemuck::bytes_of(&uniform_data));
+
+gpu::compute_galaxy(
+    device, queue,
+    self.gpu_compute.as_ref().unwrap(),
+    self.rgba_buffer.as_ref().unwrap(),
+    self.uniform_buffer.as_ref().unwrap(),
+    self.render_w, self.render_h,
+    display_tex,
+);
+```
+
 ## Commands
 
 | Purpose | Command                        | Expected              |
@@ -105,6 +137,8 @@ Self {
 }
 ```
 
+**Verify**: `cargo check` → exit 0 (struct compiles with new field)
+
 ### Step 2: Add lazy-init and invalidation methods
 
 Add to `impl GpuCompute`:
@@ -142,26 +176,14 @@ pub fn invalidate_scene_bind_group(&mut self) {
 }
 ```
 
+**Verify**: `cargo check` → exit 0 (methods compile, no callers yet)
+
 ### Step 3: Update `compute_galaxy` to use cached bind group
 
-Change the `compute_galaxy` signature to accept a `&wgpu::BindGroup` instead
-of constructing one:
+In `src/gpu.rs`, change the `compute_galaxy` function in two places:
 
-**Before:**
-```rust
-pub fn compute_galaxy(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    compute: &GpuCompute,
-    rgba_buffer: &wgpu::Buffer,
-    uniform_buffer: &wgpu::Buffer,
-    image_w: u32,
-    image_h: u32,
-    target_texture: &wgpu::Texture,
-) {
-```
+**A) Signature** — add `scene_bind_group` parameter after `uniform_buffer`:
 
-**After:**
 ```rust
 pub fn compute_galaxy(
     device: &wgpu::Device,
@@ -176,12 +198,12 @@ pub fn compute_galaxy(
 ) {
 ```
 
-Replace the bind group creation block with direct use:
+**B) Body** — delete the bind group creation block (currently lines 573–583:
+the entire `let scene_bg = device.create_bind_group(...);` statement including
+the trailing `);`). Replace the `cpass.set_bind_group` call inside the
+compute pass to use the parameter:
 
 ```rust
-// ── uniforms (pre-written by caller) ────────────────────
-// (remove the create_bind_group call entirely)
-
 // ── dispatch ─────────────────────────────────────────────
 let thread_group_x = image_w.div_ceil(8);
 let thread_group_y = image_h.div_ceil(8);
@@ -198,27 +220,51 @@ let mut encoder =
     cpass.set_bind_group(0, scene_bind_group, &[]);
     cpass.dispatch_workgroups(thread_group_x, thread_group_y, 1);
 }
-// ... rest unchanged
+// ... copy_buffer_to_texture unchanged ...
 ```
+
+Note: `uniform_buffer` is no longer used inside `compute_galaxy` — it was
+only consumed by the now-deleted `create_bind_group` call. Leave it in the
+signature for now (removing it would cascade to the `main.rs` call site and
+is a separate cleanup). The compiler may warn about an unused argument;
+accept it.
+
+**Verify**: `cargo check` → exit 0 *for gpu.rs*. Expect errors from
+`main.rs` (signature mismatch at the call site — fixed in step 5).
 
 ### Step 4: Wire invalidation in `main.rs`
 
-In `main.rs`, locate the `recreate_*.unwrap()` calls that recreate
-`rgba_buffer`. Whenever `rgba_buffer` is reassigned, invalidate:
+In `main.rs`, find every line where `self.rgba_buffer` is reassigned
+(search: `self.rgba_buffer = Some(`). There are two locations:
 
+1. **In `redraw()`** — inside the
+   `if self.render_w != new_w || self.render_h != new_h` resize block.
+   After the `self.rgba_buffer = Some(recreate_texture(...))` line, add:
 ```rust
-self.rgba_buffer = Some(recreate_texture(...));
 if let Some(ref mut compute) = self.gpu_compute {
     compute.invalidate_scene_bind_group();
 }
 ```
 
+2. **In `App::init()`** — after the initial `rgba_buffer` creation. Same
+   block as above (harmless since no cached bind group exists yet, but
+   defensive).
+
+**Verify**: `cargo check` → exit 0 for main.rs (invalidation code compiles;
+still has signature mismatch from step 3)
+
 ### Step 5: Update call site in `main.rs`
 
-In `redraw()`, before calling `compute_galaxy`, ensure + retrieve the cached
-bind group:
+In `redraw()`, locate the `compute_galaxy` call (~line 760). Replace it
+to pass the cached bind group.
+
+**Borrow checker constraint**: `ensure_scene_bind_group` takes `&mut self`
+on `GpuCompute`. Call it BEFORE the existing field destructure that borrows
+`self.gpu_compute` immutably. Insert this block right before the
+`compute_galaxy` call (after the uniform buffer write):
 
 ```rust
+// Ensure cached scene bind group (created lazily, reused across frames)
 let scene_bg = self.gpu_compute.as_mut().unwrap()
     .ensure_scene_bind_group(device, self.uniform_buffer.as_ref().unwrap(), self.rgba_buffer.as_ref().unwrap());
 
@@ -233,16 +279,30 @@ gpu::compute_galaxy(
 );
 ```
 
-The `gpu_compute` must be `as_mut()` for `ensure_scene_bind_group` (takes
-`&mut self`). Adjust the destructure or borrow order accordingly.
+If the compiler rejects this due to overlapping mutable + immutable borrows
+on `self.gpu_compute`, extract the `ensure_scene_bind_group` call to a
+separate `let scene_bg = ...;` statement BEFORE any other field borrows.
+The mutable borrow ends at the semicolon of that `let` statement, freeing
+`self.gpu_compute` for the subsequent immutable borrow.
 
-### Step 6: Validate
+**Verify**: `cargo check` → exit 0 (no errors anywhere)
+
+### Step 6: Full validation
 
 ```bash
 cargo check
 cargo clippy -- -D warnings
 cargo test
 ```
+
+All 45 tests must pass. Fix any warnings before declaring done.
+
+## Git workflow
+
+- Branch: `advisor/013-cache-bind-group`
+- Commit message: `perf: cache compute bind group across frames`
+  (repo uses conventional-ish prefixes: `perf:`, `fix:`, `feat:`, `docs:`)
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -263,6 +323,22 @@ cargo test
 
 ## STOP conditions
 
-- `compute_galaxy` signature incompatible with any call site beyond `main.rs`
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
+- `compute_galaxy` signature change breaks any call site beyond `main.rs`
 - Resize causes panic (bind group referencing freed `rgba_buffer`)
+- You discover that `uniform_buffer` or `rgba_buffer` ARE recreated every
+  frame (the core assumption of this plan is false — report this).
 - Any existing test fails
+
+## Maintenance notes
+
+- If `uniform_buffer` or `rgba_buffer` are ever made ephemeral (recreated
+  every frame in a future refactor), this cache introduces a stale-buffer
+  UAF and must be removed or guarded with a frame counter.
+- `invalidate_scene_bind_group()` is the single point of invalidation — any
+  future code that recreates `rgba_buffer` (e.g. for dynamic resolution
+  scaling) MUST call it.
+- The `uniform_buffer` parameter on `compute_galaxy` is now vestigial (only
+  used by the removed `create_bind_group` call). If a future plan removes
+  it, update the `main.rs` call site to drop the argument.

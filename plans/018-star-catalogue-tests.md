@@ -7,7 +7,7 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- src/gpu.rs`
+> `git diff --stat 1647567..HEAD -- src/gpu.rs`
 > If `generate_star_catalogue`, `star_cell_host`, `hash3_host`,
 > `arm_modulation_host`, or `StarInstance` changed since this plan was
 > written, treat it as a STOP condition.
@@ -16,6 +16,7 @@
 
 - **Priority**: P1
 - **Effort**: M
+- **Risk**: LOW
 - **Category**: tests
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -192,27 +193,99 @@ for star in catalogue:
 
 ## Steps
 
-### Step 1: Add test module
+### Step 1: Locate the test module
 
-In `src/gpu.rs`, at the bottom of the existing `mod tests` block (after all
-existing tests), add a new module or extend with the 7 tests above.
+In `src/gpu.rs`, find the existing `#[cfg(test)] mod tests { ... }` block
+at the bottom of the file. This is where all new tests go. The module
+currently contains tests for `host_mass_to_temp`, `host_temperature_to_rgb`,
+column density host helpers (imported from `galaxy.rs` tests), and uniform
+struct layout/size checks.
 
-Helper functions already exist in the test module (`host_mass_to_temp`,
-`host_temperature_to_rgb`, host-side column density functions from
-`galaxy.rs` tests). Reuse them or add thin wrappers.
+Available helpers you can reuse:
+- `host_mass_to_temp(mass)` — maps IMF mass to temperature (K)
+- `host_temperature_to_rgb(temp)` — maps temperature to RGB via the LUT
+- `super::hash3_host(x, y, seed)` — deterministic PCG hash
+- `super::star_cell_host(cx, cy, cz, seed)` — IMF star from cell coords
+- `super::arm_modulation_host(x, z, params)` — spiral arm amplitude
+- `super::generate_star_catalogue(params, max_stars)` — the function under test
 
-### Step 2: Implement all 7 tests
+**Verify**: `cargo check` → exit 0 (confirm test module is found)
 
-Write each test as described above. Start with test 4 (determinism) and
-test 7 (no NaN) as they're the simplest and catch the most common bugs.
+### Step 2: Implement tests 4 and 7 first (safety + determinism)
 
-### Step 3: Validate
+Test 4 (determinism) and test 7 (no NaN) are the simplest and catch the
+most common regressions. Write them first:
+
+```rust
+#[test]
+fn star_catalogue_deterministic() {
+    let params = GalaxyParams::milky_way();
+    let a = generate_star_catalogue(&params, 500);
+    let b = generate_star_catalogue(&params, 500);
+    assert_eq!(a, b);
+}
+
+#[test]
+fn star_catalogue_no_nan_or_infinite() {
+    let catalogue = generate_star_catalogue(&GalaxyParams::milky_way(), 1000);
+    for star in &catalogue {
+        assert!(star.pos_x.is_finite());
+        assert!(star.pos_y.is_finite());
+        assert!(star.pos_z.is_finite());
+        assert!(star.mass.is_finite());
+        assert!(star.temp.is_finite());
+        assert!(star.lum.is_finite());
+    }
+}
+```
+
+**Verify**: `cargo test star_catalogue_deterministic star_catalogue_no_nan` → both pass
+
+### Step 3: Implement remaining 5 tests
+
+Write tests 1, 2, 3, 5, 6. Test 3 (bulge enrichment) is the most complex —
+here is the Rust implementation:
+
+```rust
+#[test]
+fn star_catalogue_bulge_enriched_over_outer_disc() {
+    let params = GalaxyParams::milky_way();
+    let catalogue = generate_star_catalogue(&params, 10_000);
+    use std::f64::consts::PI;
+    let centre_count = catalogue.iter()
+        .filter(|s| s.pos_x.powi(2) + s.pos_z.powi(2) < 5000.0_f64.powi(2))
+        .count() as f64;
+    let outer_count = catalogue.iter()
+        .filter(|s| {
+            let r = (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt();
+            r > 40_000.0 && r < 45_000.0
+        })
+        .count() as f64;
+    let centre_density = centre_count / (PI * 5000.0_f64.powi(2));
+    let outer_area = PI * (45_000.0_f64.powi(2) - 40_000.0_f64.powi(2));
+    let outer_density = outer_count / outer_area;
+    let ratio = centre_density / outer_density;
+    assert!(ratio > 10.0, "bulge enrichment ratio {} should exceed 10", ratio);
+}
+```
+
+Tests 1, 2, 5, 6 follow simpler patterns (filter, count, assert). Use
+`max_stars=5000` for spatial tests; `max_stars=1000` for faster ones.
+
+**Verify**: `cargo test` → all new tests pass (≥52 total)
+
+### Step 4: Full validation
 
 ```bash
-cargo test generate_star_catalogue
-cargo test  # full suite
 cargo clippy -- -D warnings
+cargo test  # must complete in < 10 seconds (debug mode)
 ```
+
+## Git workflow
+
+- Branch: `advisor/018-star-catalogue-tests`
+- Commit message: `test: add generate_star_catalogue characterization tests`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -230,7 +303,8 @@ cargo clippy -- -D warnings
 
 ## STOP conditions
 
-- `generate_star_catalogue` signature changed since plan was written
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Determinism test fails (PRNG logic changed)
 - Any existing test fails
 - Test run takes > 10 seconds (weighted sort of large Vec may be slow in

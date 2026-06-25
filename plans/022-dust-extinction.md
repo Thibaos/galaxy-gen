@@ -7,14 +7,16 @@
 > in `plans/README.md`.
 
 > **Drift check (run first)**:
-> `git diff --stat HEAD~1..HEAD -- galaxy-shader/src/lib.rs`
-> If `ray_march_galaxy` or the density functions changed since this plan was
-> written, treat it as a STOP condition.
+> `git diff --stat 1647567..HEAD -- galaxy-shader/src/lib.rs src/gpu.rs src/main.rs`
+> If `ray_march_galaxy`, the density functions, `GalaxyUniform`, or its
+> `from_params` method changed since this plan was written, treat it as a
+> STOP condition.
 
 ## Status
 
 - **Priority**: P3
 - **Effort**: S
+- **Risk**: LOW
 - **Category**: direction (realism)
 - **Depends on**: none
 - **Planned at**: commit `1647567`, 2026-06-25
@@ -54,6 +56,39 @@ A_G/A_V ≈ 1.0    (green reference)
 A_B/A_V ≈ 1.32   (blue most affected)
 ```
 
+## Current state
+
+**`ray_march_galaxy`** — `galaxy-shader/src/lib.rs` (~line 440):
+
+```rust
+fn ray_march_galaxy(pos: Vec3, dir: Vec3, params: &GalaxyUniform) -> Vec3 {
+    let dt = (MAX_DIST - MIN_DIST) / (STEPS as f32);
+    let mut t = MIN_DIST;
+    let mut acc = Vec3::new(0.0, 0.0, 0.0);
+
+    for _ in 0..STEPS {
+        let p = pos + dir * t;
+        let dens = density_3d(p, params);
+        // Current: constant warm-white emissivity at each step
+        acc.x += dens * dt * EMISSIVITY;
+        acc.y += dens * dt * EMISSIVITY * 0.9;
+        acc.z += dens * dt * EMISSIVITY * 0.7;
+        t += dt;
+    }
+
+    acc
+}
+```
+
+**`GalaxyUniform` struct** (`galaxy-shader/src/lib.rs` and `src/gpu.rs`) —
+currently 28 `f32` fields ending with `fov_y_deg`. New field will follow.
+
+**`from_params`** — `src/gpu.rs` (~line 310). Constructs struct literal
+from `GalaxyParams`. Add `dust_tau` to the literal.
+
+**Egui 3D panel** — `src/main.rs` (~line 940). Section with Show Glow,
+Show Stars, Star brightness, Star size. Add Dust τ slider here.
+
 ## Commands
 
 | Purpose | Command                        | Expected              |
@@ -74,94 +109,105 @@ A_B/A_V ≈ 1.32   (blue most affected)
 
 ## Steps
 
-### Step 1: Add dust extinction constants to shader
+### Step 1: Add dust constants + uniform field to shader
 
-In `galaxy-shader/src/lib.rs`, add near the other constants:
+In `galaxy-shader/src/lib.rs`:
 
+**A)** Add near other constants (after `EMISSIVITY`):
 ```rust
-/// Extinction per RGB channel relative to visual (A_λ / A_V).
-/// Based on Cardelli, Clayton & Mathis (1989) for R_V = 3.1.
-/// Blue is most extinguished (A_B ≈ 1.32 A_V), red least (A_R ≈ 0.75 A_V).
 const DUST_EXTINCTION_R: f32 = 0.75;
 const DUST_EXTINCTION_G: f32 = 1.00;
 const DUST_EXTINCTION_B: f32 = 1.32;
 ```
 
-### Step 2: Add `dust_tau` to GalaxyUniform
-
-In both `galaxy-shader/src/lib.rs` and `src/gpu.rs`, add to the struct:
-
+**B)** Add to `GalaxyUniform` struct, after `fov_y_deg`:
 ```rust
-pub dust_tau: f32,  // optical depth multiplier for dust extinction
+pub dust_tau: f32,
 ```
 
-Place it after `fov_y_deg` in both halves. Update the offset and size tests.
+**Verify**: `cargo check` → exit 0 for shader crate
+
+### Step 2: Update host GalaxyUniform + from_params
+
+In `src/gpu.rs`:
+
+**A)** Add `pub dust_tau: f32,` to host struct (same position).
+
+**B)** Add `dust_tau: f32` parameter to `from_params` and use it in
+   the struct literal (instead of hardcoding 0.2):
+```rust
+pub fn from_params(params: &GalaxyParams, dust_tau: f32) -> Self {
+    Self {
+        // ... existing fields ...
+        dust_tau,
+    }
+}
+```
+
+**C)** Update `galaxy_uniform_size` test (28 → 29 f32 fields, 112 → 116 bytes).
+Update any offset test referencing `fov_y_deg`.
+
+**Verify**: `cargo check` → exit 0; `cargo test galaxy_uniform` → pass
 
 ### Step 3: Apply extinction in ray_march_galaxy
 
-In `ray_march_galaxy`, after accumulating emissivity for each step, apply
-extinction based on the integrated dust column along the ray so far.
-
-Add a running extinction accumulator (three channels):
+In `galaxy-shader/src/lib.rs`, modify the loop body in `ray_march_galaxy`.
+Add three accumulators before the loop, replace emissivity accumulation:
 
 ```rust
 let mut dust_r = 0.0_f32;
 let mut dust_g = 0.0_f32;
 let mut dust_b = 0.0_f32;
+
+for _ in 0..STEPS {
+    let p = pos + dir * t;
+    let dens = density_3d(p, params);
+
+    let dust_dtau = dens * dt * params.dust_tau;
+    dust_r += dust_dtau * DUST_EXTINCTION_R;
+    dust_g += dust_dtau * DUST_EXTINCTION_G;
+    dust_b += dust_dtau * DUST_EXTINCTION_B;
+
+    acc.x += dens * dt * EMISSIVITY * (-dust_r).exp();
+    acc.y += dens * dt * EMISSIVITY * 0.9 * (-dust_g).exp();
+    acc.z += dens * dt * EMISSIVITY * 0.7 * (-dust_b).exp();
+
+    t += dt;
+}
 ```
 
-After each density sample, accumulate extinction:
+**Verify**: `cargo check` → exit 0; requires shader rebuild (touch `build.rs`)
 
-```rust
-// Dust extinction accumulates with density × path length
-let dust_dtau = dens * dt * params.dust_tau;
-dust_r += dust_dtau * DUST_EXTINCTION_R;
-dust_g += dust_dtau * DUST_EXTINCTION_G;
-dust_b += dust_dtau * DUST_EXTINCTION_B;
+### Step 4: Add slider + init in main.rs
 
-// Emitted light is extinguished by the dust between the emission
-// point and the camera.  Apply extinction BEFORE adding to accumulator.
-let extinction_r = (-dust_r).exp();
-let extinction_g = (-dust_g).exp();
-let extinction_b = (-dust_b).exp();
-```
+**A)** Add `dust_tau: f32,` to `App` struct, init to `0.2` in `App::new()`.
 
-The accumulated emissivity at each step becomes:
-
-```rust
-acc.x += dens * dt * EMISSIVITY * extinction_r;
-acc.y += dens * dt * EMISSIVITY * 0.9 * extinction_g;
-acc.z += dens * dt * EMISSIVITY * 0.7 * extinction_b;
-```
-
-This "extinguish before add" model means light emitted at the far side
-of the galaxy passes through all the intervening dust and emerges redder.
-
-### Step 4: Add slider in egui
-
-In the 3D View section of the egui sidebar:
-
+**B)** In egui 3D panel (~line 940), after Star size slider:
 ```rust
 ui.add(egui::Slider::new(&mut self.dust_tau, 0.0..=1.0).text("Dust τ"));
 ```
 
-Initialize `dust_tau = 0.2` in `App::new()`.
-
-### Step 5: Update from_params
-
-Add `dust_tau` parameter to `GalaxyUniform::from_params()` and update all
-call sites (main.rs redraw + test functions). Use `0.2` as default in
-tests.
-
-### Step 6: Validate
-
-```bash
-cargo check
-cargo clippy -- -D warnings
-cargo test
+**C)** At the `from_params` call site in `redraw()`, pass `self.dust_tau`:
+```rust
+let uniform_data = GalaxyUniform::from_params(&self.params, self.dust_tau);
 ```
 
-Fix test failures from the new uniform field.
+Also update any test code that calls `from_params` to pass `0.2`.
+
+**Verify**: `cargo check` → exit 0
+
+### Step 5: Full validation
+
+```bash
+cargo clippy -- -D warnings
+cargo test  # fix any test failures from uniform layout changes
+```
+
+## Git workflow
+
+- Branch: `advisor/022-dust-extinction`
+- Commit message: `feat: add dust extinction to ray-march path`
+- Do NOT push or open a PR unless instructed.
 
 ## Test plan
 
@@ -183,6 +229,8 @@ Fix test failures from the new uniform field.
 
 ## STOP conditions
 
+- The code at the locations in "Current state" doesn't match the excerpts
+  (the codebase has drifted since this plan was written).
 - Shader compilation fails (SPIR-V error)
 - Extinction makes galaxy invisible at default settings
 - Offset/size tests fail and can't be trivially updated
