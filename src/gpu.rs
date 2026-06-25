@@ -100,6 +100,15 @@ pub struct GalaxyUniform {
     pub center_y: f32,
     pub exposure: f32,
     pub log_contrast: f32,
+    // ── 3D camera / render mode ──
+    pub render_mode: u32,
+    pub camera_x: f32,
+    pub camera_y: f32,
+    pub camera_z: f32,
+    pub camera_target_x: f32,
+    pub camera_target_y: f32,
+    pub camera_target_z: f32,
+    pub fov_y_deg: f32,
 }
 
 impl GalaxyUniform {
@@ -112,6 +121,10 @@ impl GalaxyUniform {
         center_y: f64,
         exposure: f32,
         contrast: f32,
+        render_mode: u32,
+        camera_pos: (f32, f32, f32),
+        camera_target: (f32, f32, f32),
+        fov_y_deg: f32,
     ) -> Self {
         Self {
             disk_scale_length: params.disk_scale_length as f32,
@@ -133,6 +146,395 @@ impl GalaxyUniform {
             center_y: center_y as f32,
             exposure,
             log_contrast: contrast,
+            render_mode,
+            camera_x: camera_pos.0,
+            camera_y: camera_pos.1,
+            camera_z: camera_pos.2,
+            camera_target_x: camera_target.0,
+            camera_target_y: camera_target.1,
+            camera_target_z: camera_target.2,
+            fov_y_deg,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  GPU-instanced star rendering
+// ═══════════════════════════════════════════════════════════
+
+/// Maximum number of stars in the catalogue buffer.
+pub const MAX_STARS: u32 = 65536;
+
+/// Coarse cell size for catalogue scan (light-years).
+pub const CATALOGUE_CELL_SIZE: f32 = 50.0;
+
+/// Minimum stellar mass to include in the catalogue (M☉).
+pub const CATALOGUE_MASS_THRESHOLD: f32 = 0.8;
+
+/// A single star in the instance buffer.
+///
+/// Layout (28 bytes, must match `stars.wgsl`):
+///   pos_x, pos_y, pos_z, mass, temp, lum, _pad
+#[derive(Copy, Clone, Pod, Zeroable)]
+#[repr(C)]
+pub struct StarInstance {
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_z: f32,
+    pub mass: f32,
+    pub temp: f32,
+    pub lum: f32,
+    pub _pad: u32,
+}
+
+/// f64 host-side disk column density.
+fn disk_column_host(r: f64, p: &GalaxyParams) -> f64 {
+    if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
+        return 0.0;
+    }
+    let radial = (-r / p.disk_scale_length).exp();
+    2.0 * p.disk_scale_height * p.disk_central_density * radial
+}
+
+/// f64 host-side bulge column density.
+fn bulge_column_host(r: f64, p: &GalaxyParams) -> f64 {
+    if p.bulge_radius <= 0.0 {
+        return 0.0;
+    }
+    let x = r / p.bulge_radius;
+    (4.0 / 3.0) * p.bulge_radius * p.bulge_central_density * (1.0 + x * x).powf(-2.0)
+}
+
+/// f64 host-side halo column density.
+fn halo_column_host(r: f64, p: &GalaxyParams) -> f64 {
+    if p.halo_radius <= 0.0 || r < 1e-6 {
+        return p.halo_radius * p.halo_central_density * std::f64::consts::PI;
+    }
+    let x = r / p.halo_radius;
+    std::f64::consts::PI
+        * p.halo_radius
+        * p.halo_central_density
+        * (1.0 + x).powf(p.halo_slope + 1.0)
+}
+
+/// f64 host-side arm modulation.
+fn arm_modulation_host(wx: f64, wz: f64, r: f64, p: &GalaxyParams) -> f64 {
+    let hr = p.disk_scale_length;
+    if p.arm_count == 0 || p.arm_strength <= 0.0 || hr <= 0.0 {
+        return 1.0;
+    }
+    let theta = (wx as f32).atan2(wz as f32) as f64;
+    let cot_phi = 1.0 / p.arm_pitch.tan();
+    let log_spiral = theta - cot_phi * (1.0 + r / hr).ln();
+    let arm_width = 1.0 / p.arm_concentration;
+    let mut min_dtheta = std::f64::consts::PI;
+    for k in 0..p.arm_count {
+        let phase = log_spiral + std::f64::consts::TAU * (k as f64) / (p.arm_count as f64);
+        let dtheta = phase % std::f64::consts::TAU;
+        let dtheta = if dtheta > std::f64::consts::PI {
+            dtheta - std::f64::consts::TAU
+        } else {
+            dtheta
+        };
+        min_dtheta = min_dtheta.min(dtheta.abs());
+    }
+    let arg = min_dtheta / arm_width;
+    1.0 + p.arm_strength * (-0.5 * arg * arg).exp()
+}
+
+/// Host-side star cell hash (mirrors shader's hash3).
+fn hash3_host(x: u32, y: u32, seed: u32) -> u32 {
+    let mut x = x.wrapping_mul(0xcc9e2d51).wrapping_add(y);
+    x = x.rotate_left(15);
+    x = x.wrapping_mul(0x1b873593);
+    x ^= seed;
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x85ebca6b);
+    x ^= x >> 13;
+    x = x.wrapping_mul(0xc2b2ae35);
+    x ^= x >> 16;
+    x
+}
+
+/// Host-side star cell coordinate.
+fn star_cell_host(w: f32) -> u32 {
+    ((w + 1_000_000.0) * 10.0) as u32
+}
+
+/// Host-side IMF mass sample (mirrors shader).
+fn sample_imf_host(cx: u32, cz: u32) -> f32 {
+    let h = hash3_host(cx, cz, 123u32);
+    let seg = h;
+    let u = (h >> 8) as f32 / 16777215.0;
+    const IMF1_M_MIN_POW: f32 = 2.133_391_9;
+    const IMF1_RANGE: f32 = -0.902_161_4;
+    const IMF1_INV_E: f32 = -3.333_333_3;
+    const IMF2_M_MIN_POW: f32 = 2.462_288_8;
+    const IMF2_RANGE: f32 = -2.459_776_8;
+    const IMF2_INV_E: f32 = -0.769_230_8;
+    const IMF_SEG_THRESH: u32 = 2_636_411_560;
+    if seg < IMF_SEG_THRESH {
+        (IMF1_M_MIN_POW + IMF1_RANGE * u).powf(IMF1_INV_E)
+    } else {
+        (IMF2_M_MIN_POW + IMF2_RANGE * u).powf(IMF2_INV_E)
+    }
+}
+
+/// Host-side mass→temperature (mirrors shader).
+fn mass_to_temp_host(m: f64) -> f64 {
+    if m <= 0.08 {
+        return 2300.0;
+    }
+    let (ref_m, ref_t, exp) = if m < 0.50 {
+        (0.16, 3060.0, 0.53)
+    } else if m < 1.0 {
+        (0.88, 5240.0, 0.67)
+    } else if m < 2.40 {
+        (1.00, 5770.0, 0.57)
+    } else if m < 7.0 {
+        (2.40, 9700.0, 0.36)
+    } else {
+        (15.0, 30000.0, 0.20)
+    };
+    (ref_t * (m / ref_m).powf(exp)).min(50000.0)
+}
+
+fn mass_to_lum_f64(m: f64) -> f64 {
+    const L_BREAK: f64 = 11.313_708;
+    if m < 2.0 {
+        m.powf(3.5)
+    } else {
+        L_BREAK * (m / 2.0)
+    }
+}
+
+/// Generate a deterministic star catalogue.
+///
+/// Scans a coarse grid over the galaxy's XZ plane, uses hash-based
+/// IMF sampling and column density to decide whether each cell contains
+/// a bright star, and assigns a vertical offset from sech² profile.
+pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<StarInstance> {
+    let disc_radius = 50_000.0_f64;
+    let half_side = (disc_radius / CATALOGUE_CELL_SIZE as f64).ceil() as i32;
+    let mut stars = Vec::with_capacity(max_stars);
+
+    for ix in -half_side..=half_side {
+        for iz in -half_side..=half_side {
+            let wx = ix as f64 * CATALOGUE_CELL_SIZE as f64;
+            let wz = iz as f64 * CATALOGUE_CELL_SIZE as f64;
+            let r = (wx * wx + wz * wz).sqrt();
+            if r > disc_radius {
+                continue;
+            }
+
+            let col = disk_column_host(r, params) * arm_modulation_host(wx, wz, r, params)
+                + bulge_column_host(r, params)
+                + halo_column_host(r, params);
+            if col <= 0.0 {
+                continue;
+            }
+
+            let cell_area = CATALOGUE_CELL_SIZE as f64 * CATALOGUE_CELL_SIZE as f64;
+            let lambda = col * cell_area;
+            let prob = 1.0 - (-lambda).exp();
+
+            let cx = star_cell_host(wx as f32);
+            let cz = star_cell_host(wz as f32);
+            let h = hash3_host(cx, cz, 77u32);
+            let rnd = (h >> 8) as f64 / 16777215.0;
+            if rnd >= prob {
+                continue;
+            }
+
+            let mass = sample_imf_host(cx, cz);
+            if (mass as f64) < CATALOGUE_MASS_THRESHOLD as f64 {
+                continue;
+            }
+
+            let temp = mass_to_temp_host(mass as f64);
+            let lum = mass_to_lum_f64(mass as f64);
+
+            let jx = ((h & 0xFF) as f64 / 255.0 - 0.5) * CATALOGUE_CELL_SIZE as f64;
+            let jz = (((h >> 16) & 0xFF) as f64 / 255.0 - 0.5) * CATALOGUE_CELL_SIZE as f64;
+
+            let hy = hash3_host(cx, cz, 31337u32);
+            let u_y = ((hy >> 8) as f64 / 16777215.0).clamp(0.001, 0.999);
+            let y_offset = 2.0 * params.disk_scale_height * (2.0 * u_y - 1.0).atanh();
+
+            stars.push(StarInstance {
+                pos_x: (wx + jx) as f32,
+                pos_y: y_offset as f32,
+                pos_z: (wz + jz) as f32,
+                mass,
+                temp: temp as f32,
+                lum: lum as f32,
+                _pad: 0,
+            });
+
+            if stars.len() >= max_stars {
+                return stars;
+            }
+        }
+    }
+    stars
+}
+
+/// Holds all GPU resources for the instanced star rendering pass.
+pub struct GpuStars {
+    pub instance_buffer: wgpu::Buffer,
+    pub instance_count: u32,
+    pub bind_group: wgpu::BindGroup,
+    pub bind_group_layout: wgpu::BindGroupLayout,
+    pub pipeline: wgpu::RenderPipeline,
+    pub camera_buffer: wgpu::Buffer,
+    pub brightness_buffer: wgpu::Buffer,
+}
+
+impl GpuStars {
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        let stars_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("stars.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("stars.wgsl").into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stars"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("stars"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stars"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &stars_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &stars_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // Camera uniform buffer (64 bytes = mat4)
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("star_camera"),
+            size: 64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Brightness uniform buffer (16 bytes = vec4<f32> for alignment)
+        let brightness_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("star_brightness"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Instance buffer (header + max_stars * stride)
+        let star_stride = 7u32; // 7 u32 per StarInstance
+        let header_bytes = 8u64; // 2 u32 = count + capacity
+        let instance_bytes = MAX_STARS as u64 * star_stride as u64 * 4;
+        let buf_size = header_bytes + instance_bytes;
+
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("star_instances"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stars-bind"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: instance_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: brightness_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        Self {
+            instance_buffer,
+            instance_count: 0,
+            bind_group,
+            bind_group_layout,
+            pipeline,
+            camera_buffer,
+            brightness_buffer,
         }
     }
 }
@@ -298,8 +700,20 @@ mod tests {
     #[test]
     fn from_params_preserves_values() {
         let params = GalaxyParams::milky_way();
-        let uniform =
-            GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
+        let uniform = GalaxyUniform::from_params(
+            &params,
+            1920,
+            1080,
+            512_000.0,
+            0.0,
+            0.0,
+            0.60,
+            0.04,
+            0,
+            (0.0, 5000.0, 0.0),
+            (0.0, 0.0, 0.0),
+            45.0,
+        );
 
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
         assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
@@ -334,8 +748,20 @@ mod tests {
     #[test]
     fn from_params_preserves_values_ngc628() {
         let params = GalaxyParams::ngc628();
-        let uniform =
-            GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
+        let uniform = GalaxyUniform::from_params(
+            &params,
+            1920,
+            1080,
+            512_000.0,
+            0.0,
+            0.0,
+            0.60,
+            0.04,
+            0,
+            (0.0, 5000.0, 0.0),
+            (0.0, 0.0, 0.0),
+            45.0,
+        );
 
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
         assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
@@ -363,8 +789,20 @@ mod tests {
     #[test]
     fn from_params_with_nonzero_center() {
         let params = GalaxyParams::milky_way();
-        let uniform =
-            GalaxyUniform::from_params(&params, 800, 600, 100_000.0, 5000.0, -2000.0, 0.50, 0.02);
+        let uniform = GalaxyUniform::from_params(
+            &params,
+            800,
+            600,
+            100_000.0,
+            5000.0,
+            -2000.0,
+            0.50,
+            0.02,
+            0,
+            (0.0, 5000.0, 0.0),
+            (0.0, 0.0, 0.0),
+            45.0,
+        );
         assert_eq!(uniform.center_x, 5000.0_f32);
         assert_eq!(uniform.center_y, -2000.0_f32);
         assert_eq!(uniform.extent, 100_000.0_f32);
@@ -378,7 +816,20 @@ mod tests {
     fn uniform_is_pod() {
         // Verify bytemuck traits work
         let params = GalaxyParams::milky_way();
-        let uniform = GalaxyUniform::from_params(&params, 100, 100, 1000.0, 0.0, 0.0, 0.5, 0.05);
+        let uniform = GalaxyUniform::from_params(
+            &params,
+            100,
+            100,
+            1000.0,
+            0.0,
+            0.0,
+            0.5,
+            0.05,
+            0,
+            (0.0, 5000.0, 0.0),
+            (0.0, 0.0, 0.0),
+            45.0,
+        );
         let _bytes: &[u8] = bytemuck::bytes_of(&uniform);
         // If this compiles and doesn't panic, Pod+Zeroable is satisfied
     }
@@ -386,7 +837,7 @@ mod tests {
     #[test]
     fn uniform_struct_size_matches_fields() {
         // Runtime size check as a cross-check against shader-side layout mismatch
-        let expected = std::mem::size_of::<f32>() * 16 + std::mem::size_of::<u32>() * 3;
+        let expected = std::mem::size_of::<f32>() * 23 + std::mem::size_of::<u32>() * 4;
         assert_eq!(std::mem::size_of::<GalaxyUniform>(), expected);
     }
 
@@ -722,7 +1173,7 @@ mod tests {
 
         assert_eq!(
             size_of::<GalaxyUniform>(),
-            76,
+            108,
             "overall size mismatch with shader"
         );
 
@@ -745,6 +1196,14 @@ mod tests {
         assert_eq!(offset_of!(GalaxyUniform, center_y), 64);
         assert_eq!(offset_of!(GalaxyUniform, exposure), 68);
         assert_eq!(offset_of!(GalaxyUniform, log_contrast), 72);
+        assert_eq!(offset_of!(GalaxyUniform, render_mode), 76);
+        assert_eq!(offset_of!(GalaxyUniform, camera_x), 80);
+        assert_eq!(offset_of!(GalaxyUniform, camera_y), 84);
+        assert_eq!(offset_of!(GalaxyUniform, camera_z), 88);
+        assert_eq!(offset_of!(GalaxyUniform, camera_target_x), 92);
+        assert_eq!(offset_of!(GalaxyUniform, camera_target_y), 96);
+        assert_eq!(offset_of!(GalaxyUniform, camera_target_z), 100);
+        assert_eq!(offset_of!(GalaxyUniform, fov_y_deg), 104);
     }
 
     // ── New star colour tests ─────────────────────────
@@ -892,5 +1351,132 @@ mod tests {
                 COLOR_LUT_HOST[i + 1].0
             );
         }
+    }
+
+    // ── 3D density tests ──────────────────────────────
+
+    fn host_disk_density_3d(x: f64, y: f64, z: f64, p: &GalaxyParams) -> f64 {
+        if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
+            return 0.0;
+        }
+        let r = (x * x + z * z).sqrt();
+        let sech = 1.0 / (y / (2.0 * p.disk_scale_height)).cosh();
+        p.disk_central_density * 0.5 * (-r / p.disk_scale_length).exp() * sech * sech
+    }
+
+    fn host_bulge_density_3d(x: f64, y: f64, z: f64, p: &GalaxyParams) -> f64 {
+        if p.bulge_radius <= 0.0 {
+            return 0.0;
+        }
+        let r2 = x * x + y * y + z * z;
+        let x2 = r2 / (p.bulge_radius * p.bulge_radius);
+        p.bulge_central_density * (1.0 + x2).powf(-2.5)
+    }
+
+    #[test]
+    fn disk_density_3d_midplane_matches_2d_profile() {
+        let p = GalaxyParams::milky_way();
+        // Normalization check: ∫ ρ₃D(R,y) dy must equal the existing column(R).
+        //   column(0) = 2·hz·ρ₀  (disk_column at r=0)
+        //   ∫ ρ₃D(0,y) dy = ∫ ρ₀·0.5·sech²(y/2hz) dy = ρ₀·0.5·4hz = 2·hz·ρ₀ ✓
+        // Therefore midplane density = column(0) / (4·hz)
+        let col = 2.0 * p.disk_scale_height * p.disk_central_density; // disk_column(0) simplified
+        let dens = host_disk_density_3d(0.0, 0.0, 0.0, &p);
+        let expected = col / (4.0 * p.disk_scale_height);
+        assert!(
+            (dens - expected).abs() < 1e-10,
+            "midplane density {dens} != column/(4hz) = {expected}"
+        );
+    }
+
+    #[test]
+    fn disk_density_3d_decays_vertically() {
+        let p = GalaxyParams::milky_way();
+        let d0 = host_disk_density_3d(0.0, 0.0, 0.0, &p);
+        let d1 = host_disk_density_3d(0.0, p.disk_scale_height, 0.0, &p);
+        let d2 = host_disk_density_3d(0.0, 2.0 * p.disk_scale_height, 0.0, &p);
+        assert!(d0 > 0.0);
+        assert!(d1 < d0, "density should decrease with |y|");
+        assert!(d2 < d1, "density should continue decreasing");
+        // sech²(0.5) ≈ 0.786 at y = hz
+        let sech_at_hz = 1.0 / (0.5_f64.cosh());
+        let expected_ratio = sech_at_hz * sech_at_hz;
+        let actual_ratio = d1 / d0;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 0.001,
+            "density at y=hz / d0 = {actual_ratio}, expected {expected_ratio}"
+        );
+    }
+
+    #[test]
+    fn disk_density_3d_sech_squared_profile() {
+        // Verify sech² shape: density(y) / density(0) = sech²(y/2hz)
+        let p = GalaxyParams::milky_way();
+        for &y in &[0.0_f64, 500.0, 1000.0, 2000.0] {
+            let dens = host_disk_density_3d(0.0, y, 0.0, &p);
+            let expected = p.disk_central_density
+                * 0.5
+                * (1.0 / (y / (2.0 * p.disk_scale_height)).cosh()).powi(2);
+            assert!(
+                (dens - expected).abs() < 1e-12,
+                "density at y={y} = {dens}, expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn bulge_density_3d_plummer_profile() {
+        let p = GalaxyParams::milky_way();
+        let d0 = host_bulge_density_3d(0.0, 0.0, 0.0, &p);
+        let da = host_bulge_density_3d(p.bulge_radius, 0.0, 0.0, &p);
+        assert!(d0 > 0.0);
+        // Plummer 3D: ρ(R) ∝ (1 + R²/a²)^(-2.5). At R=a: (1+1)^(-2.5) = 2^(-2.5) ≈ 0.1768
+        let expected_ratio = 2.0_f64.powf(-2.5);
+        let actual_ratio = da / d0;
+        assert!(
+            (actual_ratio - expected_ratio).abs() < 0.001,
+            "bulge 3D at R=a / d0 = {actual_ratio}, expected {expected_ratio}"
+        );
+    }
+
+    #[test]
+    fn wgsl_color_lut_matches_rust_lut() {
+        let wgsl_source = include_str!("stars.wgsl");
+        let start = wgsl_source.find("const LUT_DATA:").unwrap();
+        let end = wgsl_source[start..].find(");").unwrap() + start + 2;
+        let lut_section = &wgsl_source[start..end];
+
+        for (i, entry) in COLOR_LUT_HOST.iter().enumerate() {
+            let expected = format!(
+                "vec4<f32>({:.1}, {:.3}, {:.3}, {:.3})",
+                entry.0, entry.1, entry.2, entry.3
+            );
+            assert!(
+                lut_section.contains(&expected),
+                "LUT entry {i} ({expected}) not found in stars.wgsl"
+            );
+        }
+    }
+
+    #[test]
+    fn uniform_new_fields_have_reasonable_defaults() {
+        let params = GalaxyParams::milky_way();
+        let uniform = GalaxyUniform::from_params(
+            &params,
+            800,
+            600,
+            100_000.0,
+            0.0,
+            0.0,
+            0.5,
+            0.05,
+            0,
+            (0.0, 5000.0, 0.0),
+            (0.0, 0.0, 0.0),
+            45.0,
+        );
+        assert_eq!(uniform.render_mode, 0);
+        assert_eq!(uniform.fov_y_deg, 45.0);
+        assert!(uniform.camera_y > 0.0, "camera should be above the disk");
     }
 }

@@ -1015,6 +1015,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "glam 0.29.3",
  "image",
  "pollster",
  "spirv-builder",
@@ -1081,6 +1082,15 @@ dependencies = [
  "khronos_api",
  "log",
  "xml-rs",
+]
+
+[[package]]
+name = "glam"
+version = "0.29.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
@@ -3132,7 +3142,7 @@ version = "0.10.0-alpha.1"
 source = "git+https://github.com/Rust-GPU/rust-gpu#67f1ff27272a1dff82776a5ad7388c738e0b31be"
 dependencies = [
  "bitflags 1.3.2",
- "glam",
+ "glam 0.33.1",
  "libm",
  "num-traits",
  "spirv-std-macros",

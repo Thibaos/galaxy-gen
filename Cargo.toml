@@ -27,6 +27,7 @@ image = "0.25.10"
 egui = "0.31"
 egui-wgpu = "0.31"
 egui-winit = "0.31"
+glam = { version = "0.29", features = ["libm"] }
 
 [profile.dev.build-override]
 opt-level = 3

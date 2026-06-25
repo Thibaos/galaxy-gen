@@ -31,6 +31,15 @@ pub struct GalaxyUniform {
     pub center_y: f32,
     pub exposure: f32,
     pub log_contrast: f32,
+    // ── 3D camera / render mode ──
+    pub render_mode: u32, // 0 = 2D (current), 1 = 3D ray-march
+    pub camera_x: f32,    // world-space camera position
+    pub camera_y: f32,
+    pub camera_z: f32,
+    pub camera_target_x: f32, // look-at point
+    pub camera_target_y: f32,
+    pub camera_target_z: f32,
+    pub fov_y_deg: f32, // vertical field of view in degrees
 }
 
 const PI: f32 = core::f32::consts::PI;
@@ -95,6 +104,48 @@ fn arm_modulation_2d(x: f32, z: f32, r: f32, p: &GalaxyUniform) -> f32 {
 
     let arg = min_dtheta / arm_width;
     1.0 + p.arm_strength * (-0.5 * arg * arg).exp()
+}
+
+// ═══════════════════════════════════════════════════════════
+//  3D density profiles (used by ray-march path)
+// ═══════════════════════════════════════════════════════════
+
+/// Disk 3D density: exponential radial × sech² vertical.
+///
+/// ρ(R, z) = ρ₀ × exp(−R/h_r) × sech²(z / (2 × h_z))
+///
+/// sech² is a common fit for isothermal self-gravitating disks
+/// (Spitzer 1942, van der Kruit & Searle 1981).
+fn disk_density_3d(x: f32, y: f32, z: f32, p: &GalaxyUniform) -> f32 {
+    if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
+        return 0.0;
+    }
+    let r = (x * x + z * z).sqrt();
+    let sech = 1.0 / (y / (2.0 * p.disk_scale_height)).cosh();
+    p.disk_central_density * 0.5 * (-r / p.disk_scale_length).exp() * sech * sech
+}
+
+/// Bulge 3D density (Plummer sphere).
+///
+/// ρ(r) = ρ₀ × (1 + r²/a²)^(−2.5)
+fn bulge_density_3d(x: f32, y: f32, z: f32, p: &GalaxyUniform) -> f32 {
+    if p.bulge_radius <= 0.0 {
+        return 0.0;
+    }
+    let r2 = x * x + y * y + z * z;
+    let x2 = r2 / (p.bulge_radius * p.bulge_radius);
+    p.bulge_central_density * (1.0 + x2).powf(-2.5)
+}
+
+/// Halo 3D density (power-law sphere).
+///
+/// ρ(r) = ρ₀ × (1 + r/R_h)^s
+fn halo_density_3d(x: f32, y: f32, z: f32, p: &GalaxyUniform) -> f32 {
+    if p.halo_radius <= 0.0 {
+        return 0.0;
+    }
+    let r = (x * x + y * y + z * z).sqrt();
+    p.halo_central_density * (1.0 + r / p.halo_radius).powf(p.halo_slope)
 }
 
 /// Bulge column (Plummer sphere): ∫₋∞⁺∞ (1 + R²/a² + y²/a²)^(-2.5) dy
@@ -401,6 +452,113 @@ fn sample_star_grid(wx: f32, wz: f32, pixel_w: f32, pixel_h: f32, col_dens: f32)
 }
 
 // ═══════════════════════════════════════════════════════════
+//  3D ray-march path
+// ═══════════════════════════════════════════════════════════
+
+/// Number of ray-march steps along the camera ray.
+const RAY_STEPS: u32 = 64;
+
+/// Maximum ray-march distance in light-years (≈ galaxy far-field radius).
+const RAY_MAX_DIST: f32 = 200_000.0;
+
+/// 3D ray-march: returns accumulated emissivity as linear RGB.
+///
+/// Each step samples the 3D density field, multiplies by an
+/// emissivity-per-unit-density factor, and accumulates.
+/// The camera ray is constructed from the uniform's camera position,
+/// look-at target, and FOV.
+fn ray_march_galaxy(px: u32, py: u32, p: &GalaxyUniform) -> Vec3 {
+    let aspect = p.image_width as f32 / p.image_height as f32;
+
+    // Camera basis vectors
+    let forward_x = p.camera_target_x - p.camera_x;
+    let forward_y = p.camera_target_y - p.camera_y;
+    let forward_z = p.camera_target_z - p.camera_z;
+    let forward_len =
+        (forward_x * forward_x + forward_y * forward_y + forward_z * forward_z).sqrt();
+    if forward_len < 1e-6 {
+        return Vec3::new(0.0, 0.0, 0.0);
+    }
+    let fx = forward_x / forward_len;
+    let fy = forward_y / forward_len;
+    let fz = forward_z / forward_len;
+
+    // Right = forward × world_up (0, 1, 0)
+    let world_up_x: f32 = 0.0;
+    let world_up_y: f32 = 1.0;
+    let world_up_z: f32 = 0.0;
+    let rx = fy * world_up_z - fz * world_up_y;
+    let ry = fz * world_up_x - fx * world_up_z;
+    let rz = fx * world_up_y - fy * world_up_x;
+    let r_len = (rx * rx + ry * ry + rz * rz).sqrt();
+    let (rx, ry, rz) = if r_len < 1e-6 {
+        // Camera looking straight up/down — use an arbitrary right vector
+        (1.0, 0.0, 0.0)
+    } else {
+        (rx / r_len, ry / r_len, rz / r_len)
+    };
+
+    // Up = right × forward
+    let ux = ry * fz - rz * fy;
+    let uy = rz * fx - rx * fz;
+    let uz = rx * fy - ry * fx;
+
+    // Screen-space to ray direction
+    let half_h = (0.5 * p.fov_y_deg).to_radians().tan();
+    let half_w = half_h * aspect;
+    let sx = (px as f32 / p.image_width as f32 - 0.5) * 2.0;
+    let sy = -(py as f32 / p.image_height as f32 - 0.5) * 2.0;
+
+    let dir_x = fx + sx * half_w * rx + sy * half_h * ux;
+    let dir_y = fy + sx * half_w * ry + sy * half_h * uy;
+    let dir_z = fz + sx * half_w * rz + sy * half_h * uz;
+    let dir_len = (dir_x * dir_x + dir_y * dir_y + dir_z * dir_z).sqrt();
+    let dx = dir_x / dir_len;
+    let dy = dir_y / dir_len;
+    let dz = dir_z / dir_len;
+
+    // ── Ray-march ──
+    let dt = RAY_MAX_DIST / RAY_STEPS as f32;
+    let mut acc = Vec3::new(0.0, 0.0, 0.0);
+
+    // Start at t = 0 (camera position) or t_near
+    let mut t = 0.0;
+    for _ in 0..RAY_STEPS {
+        let sx_pos = p.camera_x + t * dx;
+        let sy_pos = p.camera_y + t * dy;
+        let sz_pos = p.camera_z + t * dz;
+        t += dt;
+
+        let r = (sx_pos * sx_pos + sz_pos * sz_pos).sqrt();
+
+        // Skip if outside galaxy bounds
+        if r > RAY_MAX_DIST * 0.5 {
+            continue;
+        }
+
+        let dens = disk_density_3d(sx_pos, sy_pos, sz_pos, p)
+            * arm_modulation_2d(sx_pos, sz_pos, r, p)
+            + bulge_density_3d(sx_pos, sy_pos, sz_pos, p)
+            + halo_density_3d(sx_pos, sy_pos, sz_pos, p);
+
+        if dens <= 0.0 {
+            continue;
+        }
+
+        // Smooth emissivity: average stellar light per unit density.
+        // Using a constant warm-white colour (solar-like) scaled by a
+        // calibrated factor.  Individual bright star points are rendered
+        // separately by the instanced star pass (plan 012).
+        const EMISSIVITY: f32 = 1.5;
+        acc.x += dens * dt * EMISSIVITY;
+        acc.y += dens * dt * EMISSIVITY * 0.9;
+        acc.z += dens * dt * EMISSIVITY * 0.7;
+    }
+
+    acc
+}
+
+// ═══════════════════════════════════════════════════════════
 //  Unified scene render (single pass)
 // ═══════════════════════════════════════════════════════════
 
@@ -419,18 +577,22 @@ pub fn render_scene(
     let buf_stride = params.image_width.div_ceil(64u32) * 64u32;
     let idx = (py * buf_stride + px) as usize;
 
-    // ── world position ─────────────────────────────────
-    let extent_x = params.extent;
-    let extent_y = params.extent * (params.image_height as f32 / params.image_width as f32);
-    let wx = (px as f32 / params.image_width as f32 - 0.5) * extent_x + params.center_x;
-    let wz = -(py as f32 / params.image_height as f32 - 0.5) * extent_y + params.center_y;
+    // ── compute rgb based on render mode ──
+    let rgb = if params.render_mode == 0 {
+        // ── 2D path (current behaviour) ──
+        let extent_x = params.extent;
+        let extent_y = params.extent * (params.image_height as f32 / params.image_width as f32);
+        let pixel_w = extent_x / params.image_width as f32;
+        let pixel_h = extent_y / params.image_height as f32;
+        let wx = (px as f32 / params.image_width as f32 - 0.5) * extent_x + params.center_x;
+        let wz = -(py as f32 / params.image_height as f32 - 0.5) * extent_y + params.center_y;
 
-    // ── star light ─────────────────────────────────────
-    let col_dens = column_density(wx, wz, params);
-    let pixel_w = extent_x / params.image_width as f32;
-    let pixel_h = extent_y / params.image_height as f32;
-
-    let rgb = sample_star_grid(wx, wz, pixel_w, pixel_h, col_dens);
+        let col_dens = column_density(wx, wz, params);
+        sample_star_grid(wx, wz, pixel_w, pixel_h, col_dens)
+    } else {
+        // ── 3D ray-march path ──
+        ray_march_galaxy(px, py, params)
+    };
 
     // ── tone-map (luminance-based, preserves chromaticity) ───
     // Applying ln() per-channel destroys colour ratios.

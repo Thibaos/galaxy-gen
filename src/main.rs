@@ -71,7 +71,25 @@ struct App {
     // mouse
     dragging: bool,
     last_mouse: (f64, f64),
-    saved_startup_image: bool,
+
+    // 3D mode
+    render_mode: u32,
+    camera_dist: f32,
+    camera_azimuth: f32,
+    camera_elevation: f32,
+    camera_target_x: f32,
+    camera_target_y: f32,
+    camera_target_z: f32,
+    fov_y: f32,
+    orbit_dragging: bool,
+
+    // instanced stars
+    gpu_stars: Option<gpu::GpuStars>,
+    show_stars: bool,
+    show_glow: bool,
+    star_brightness: f32,
+    star_catalogue: Vec<gpu::StarInstance>,
+    star_catalogue_dirty: bool,
 }
 
 impl App {
@@ -108,8 +126,72 @@ impl App {
             egui_renderer: None,
             dragging: false,
             last_mouse: (0.0, 0.0),
-            saved_startup_image: false,
+            render_mode: 0,
+            camera_dist: 100_000.0,
+            camera_azimuth: 0.0,
+            camera_elevation: std::f32::consts::FRAC_PI_2 - 0.05, // near-top-down (avoid degenerate look-at)
+            camera_target_x: 0.0,
+            camera_target_y: 0.0,
+            camera_target_z: 0.0,
+            fov_y: 45.0,
+            orbit_dragging: false,
+            gpu_stars: None,
+            show_stars: true,
+            show_glow: true,
+            star_brightness: 0.3,
+            star_catalogue: Vec::new(),
+            star_catalogue_dirty: true,
         }
+    }
+
+    fn camera_position(&self) -> (f32, f32, f32) {
+        let horiz = self.camera_dist * self.camera_elevation.cos();
+        let x = self.camera_target_x + horiz * self.camera_azimuth.sin();
+        let y = self.camera_target_y + self.camera_dist * self.camera_elevation.sin();
+        let z = self.camera_target_z + horiz * self.camera_azimuth.cos();
+        (x, y, z)
+    }
+
+    fn ensure_star_catalogue(&mut self) {
+        if self.star_catalogue_dirty {
+            self.star_catalogue = gpu::generate_star_catalogue(
+                &self.params,
+                gpu::MAX_STARS as usize,
+            );
+            println!("Star catalogue: {} stars", self.star_catalogue.len());
+            self.star_catalogue_dirty = false;
+        }
+    }
+
+    fn write_view_proj_matrix(&self, queue: &wgpu::Queue, gpu_stars: &gpu::GpuStars) {
+        let cam_pos = self.camera_position();
+        let eye = glam::Vec3::new(cam_pos.0, cam_pos.1, cam_pos.2);
+        let target = glam::Vec3::new(
+            self.camera_target_x, self.camera_target_y, self.camera_target_z,
+        );
+        let mut up = glam::Vec3::Y;
+
+        // Avoid degenerate look-at when view direction is parallel to up.
+        let dir = (target - eye).normalize();
+        if dir.dot(up).abs() > 0.9999 {
+            up = glam::Vec3::Z;
+        }
+
+        let view = glam::Mat4::look_at_rh(eye, target, up);
+        let aspect = self.render_w as f32 / self.render_h as f32;
+        let fov_rad = self.fov_y.to_radians();
+        let proj = glam::Mat4::perspective_rh(fov_rad, aspect, 100.0, 1_000_000.0);
+        let vp = proj * view;
+
+        // Star brightness uniform (f32 at offset 0; followed by 3x f32 padding for alignment)
+        let brightness: [f32; 4] = [self.star_brightness, 0.0, 0.0, 0.0];
+        queue.write_buffer(&gpu_stars.brightness_buffer, 0, bytemuck::cast_slice(&brightness));
+
+        queue.write_buffer(
+            &gpu_stars.camera_buffer,
+            0,
+            bytemuck::cast_slice(&vp.to_cols_array()),
+        );
     }
 }
 
@@ -232,6 +314,11 @@ impl App {
         self.sampler = Some(sampler);
 
         self.gpu_compute = Some(gpu::GpuCompute::new(self.device.as_ref().unwrap()));
+
+        self.gpu_stars = Some(gpu::GpuStars::new(
+            self.device.as_ref().unwrap(),
+            self.config.as_ref().unwrap().format,
+        ));
 
         let egui_state = egui_winit::State::new(
             self.egui_ctx.clone(),
@@ -388,6 +475,7 @@ impl App {
                             _ => GalaxyParams::ngc628(),
                         };
                         self.needs_render = true;
+                        self.star_catalogue_dirty = true;
                     }
 
                     ui.separator();
@@ -496,6 +584,39 @@ impl App {
                         self.needs_render = true;
                     }
 
+                    // 3D controls
+                    ui.separator();
+                    ui.label("3D View");
+                    let mode_changed = ui
+                        .add(egui::Checkbox::new(&mut (self.render_mode == 1), "3D Mode"))
+                        .changed();
+                    if mode_changed {
+                        self.render_mode = if self.render_mode == 0 { 1 } else { 0 };
+                        self.needs_render = true;
+                    }
+                    if self.render_mode == 1 {
+                        let dist_changed = ui
+                            .add(egui::Slider::new(&mut self.camera_dist, 5_000.0..=500_000.0)
+                                .text("Distance (ly)"))
+                            .changed();
+                        let fov_changed = ui
+                            .add(egui::Slider::new(&mut self.fov_y, 5.0..=120.0).text("FOV"))
+                            .changed();
+                        let glow_changed = ui
+                            .add(egui::Checkbox::new(&mut self.show_glow, "Show Glow"))
+                            .changed();
+                        let stars_changed = ui
+                            .add(egui::Checkbox::new(&mut self.show_stars, "Show Stars"))
+                            .changed();
+                        let brightness_changed = ui
+                            .add(egui::Slider::new(&mut self.star_brightness, 0.0..=2.0)
+                                .text("Star brightness"))
+                            .changed();
+                        if dist_changed || fov_changed || glow_changed || stars_changed || brightness_changed {
+                            self.needs_render = true;
+                        }
+                    }
+
                     // Actions
                     ui.separator();
                     if ui.button("Save Screenshot").clicked() {
@@ -523,6 +644,12 @@ impl App {
                 });
         });
 
+        // Generate star catalogue before destructuring to avoid borrow conflicts
+        let needs_stars = self.render_mode == 1 && self.show_stars;
+        if needs_stars {
+            self.ensure_star_catalogue();
+        }
+
         let (surface, device, queue, config, pipeline, bind_group, texture, gpu_compute) = (
             self.surface.as_ref().unwrap(),
             self.device.as_ref().unwrap(),
@@ -542,7 +669,15 @@ impl App {
             egui_renderer.free_texture(&id);
         }
 
-        if self.needs_render {
+        // Pre-compute camera values to avoid borrow conflicts
+        let cam_pos = self.camera_position();
+        let cam_target = (self.camera_target_x, self.camera_target_y, self.camera_target_z);
+        let render_mode = self.render_mode;
+        let fov_y = self.fov_y;
+        let show_glow = self.show_glow;
+
+        let do_compute = render_mode != 1 || show_glow;
+        if self.needs_render && do_compute {
             let rgba_buf = self.rgba_buffer.as_ref().unwrap();
             let uniform_buf = self.uniform_buffer.get_or_insert_with(|| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -561,6 +696,10 @@ impl App {
                 self.center_y,
                 self.exposure,
                 self.contrast,
+                render_mode,
+                cam_pos,
+                cam_target,
+                fov_y,
             );
             queue.write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniform_data));
 
@@ -575,6 +714,33 @@ impl App {
                 texture,
             );
             self.needs_render = false;
+        }
+
+        // ── Star pass: upload catalogue + view-proj matrix ──
+        // catalogue was generated above (before destructuring) if render_mode==1 && show_stars
+        if self.render_mode == 1 && self.show_stars && !self.star_catalogue.is_empty() {
+            let gpu_stars = self.gpu_stars.as_ref().unwrap();
+
+            // Write camera view-proj matrix
+            self.write_view_proj_matrix(queue, gpu_stars);
+
+            // Upload star catalogue to GPU
+            // Write header: [count: u32, capacity: u32]
+            let mut header = [0u32; 2];
+            header[0] = self.star_catalogue.len() as u32;
+            header[1] = gpu::MAX_STARS;
+            queue.write_buffer(
+                &gpu_stars.instance_buffer,
+                0,
+                bytemuck::cast_slice(&header),
+            );
+            // Write star data at byte offset 8
+            let data_bytes = bytemuck::cast_slice(&self.star_catalogue);
+            queue.write_buffer(
+                &gpu_stars.instance_buffer,
+                8,
+                data_bytes,
+            );
         }
 
         let frame = match surface.get_current_texture() {
@@ -594,6 +760,15 @@ impl App {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Pre-extract star draw data before render pass to avoid borrow conflicts
+        let star_draw_data = if self.render_mode == 1 && self.show_stars && !self.star_catalogue.is_empty() {
+            let gpu_stars = self.gpu_stars.as_ref().unwrap();
+            let n = self.star_catalogue.len();
+            Some((&gpu_stars.pipeline, &gpu_stars.bind_group as &wgpu::BindGroup, n))
+        } else {
+            None
+        };
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -638,9 +813,19 @@ impl App {
             });
             let mut rpass = rpass.forget_lifetime();
 
-            rpass.set_pipeline(pipeline);
-            rpass.set_bind_group(0, bind_group, &[]);
-            rpass.draw(0..3, 0..1);
+            // ── Fullscreen quad (2D mode, or 3D mode with glow enabled) ──
+            if render_mode != 1 || show_glow {
+                rpass.set_pipeline(pipeline);
+                rpass.set_bind_group(0, bind_group, &[]);
+                rpass.draw(0..3, 0..1);
+            }
+
+            // ── Draw instanced stars (3D mode + additive blend) ──
+            if let Some((stars_pipe, stars_bg, star_count)) = star_draw_data {
+                rpass.set_pipeline(stars_pipe);
+                rpass.set_bind_group(0, stars_bg, &[]);
+                rpass.draw(0..6, 0..star_count as u32);
+            }
 
             egui_renderer.render(&mut rpass, &tessellated, &screen_descriptor);
         }
@@ -654,12 +839,7 @@ impl App {
             self.save_snapshot(dev, q);
         }
 
-        if !self.saved_startup_image {
-            let dev = self.device.as_ref().unwrap();
-            let q = self.queue.as_ref().unwrap();
-            self.save_snapshot(dev, q);
-            self.saved_startup_image = true;
-        }
+
     }
 
     fn save_snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -775,7 +955,12 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.dragging = state == ElementState::Pressed;
+                let pressed = state == ElementState::Pressed;
+                if self.render_mode == 1 && !self.egui_ctx.wants_pointer_input() {
+                    self.orbit_dragging = pressed;
+                } else {
+                    self.dragging = pressed;
+                }
             }
 
             WindowEvent::CursorMoved { position, .. } => {
@@ -794,6 +979,15 @@ impl ApplicationHandler for App {
 
                     self.needs_render = true;
                 }
+
+                if self.orbit_dragging && self.render_mode == 1 && !self.egui_ctx.wants_pointer_input() {
+                    let dx = cx - lx;
+                    let dy = cy - ly;
+                    self.camera_azimuth -= dx as f32 * 0.005;
+                    self.camera_elevation = (self.camera_elevation + dy as f32 * 0.005)
+                        .clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+                    self.needs_render = true;
+                }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -810,30 +1004,37 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                let old_extent = self.extent_ly;
-                let factor = if scroll > 0.0 {
-                    1.0 / ZOOM_SPEED
+                if self.render_mode == 1 {
+                    let factor = if scroll > 0.0 { 1.0 / 1.1_f64 } else { 1.1_f64 };
+                    self.camera_dist = (self.camera_dist as f64 * factor)
+                        .clamp(5_000.0, 500_000.0) as f32;
+                    self.needs_render = true;
                 } else {
-                    ZOOM_SPEED
-                };
+                    let old_extent = self.extent_ly;
+                    let factor = if scroll > 0.0 {
+                        1.0 / ZOOM_SPEED
+                    } else {
+                        ZOOM_SPEED
+                    };
 
-                self.extent_ly = (self.extent_ly * factor).clamp(MIN_EXTENT_LY, MAX_EXTENT_LY);
+                    self.extent_ly = (self.extent_ly * factor).clamp(MIN_EXTENT_LY, MAX_EXTENT_LY);
 
-                if (self.extent_ly - old_extent).abs() < 1.0 {
-                    return;
+                    if (self.extent_ly - old_extent).abs() < 1.0 {
+                        return;
+                    }
+
+                    if self.render_w > 0 && self.render_h > 0 {
+                        let fx = self.last_mouse.0 / self.render_w as f64;
+                        let fy = self.last_mouse.1 / self.render_h as f64;
+
+                        let extent_delta = old_extent - self.extent_ly;
+                        let y_aspect = self.render_h as f64 / self.render_w as f64;
+                        self.center_x += (fx - 0.5) * extent_delta;
+                        self.center_y -= (fy - 0.5) * extent_delta * y_aspect;
+                    }
+
+                    self.needs_render = true;
                 }
-
-                if self.render_w > 0 && self.render_h > 0 {
-                    let fx = self.last_mouse.0 / self.render_w as f64;
-                    let fy = self.last_mouse.1 / self.render_h as f64;
-
-                    let extent_delta = old_extent - self.extent_ly;
-                    let y_aspect = self.render_h as f64 / self.render_w as f64;
-                    self.center_x += (fx - 0.5) * extent_delta;
-                    self.center_y -= (fy - 0.5) * extent_delta * y_aspect;
-                }
-
-                self.needs_render = true;
             }
 
             WindowEvent::RedrawRequested => self.redraw(),
