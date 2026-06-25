@@ -1,0 +1,26 @@
+# M101 (Pinwheel Galaxy) — Reference Data
+# =================================================
+# Used to calibrate the galaxy-gen `GalaxyParams::m101()` preset.
+
+[identification]
+name = "M101"
+common_name = "Pinwheel Galaxy"
+morphology = "SABcd"
+
+[distance]
+mpc = 6.4   # Shappee+Stanford 2018
+mly = 20.9
+
+[structure]
+inclination_deg = 18   # de Vaucouleurs+1991 (nearly face-on)
+stellar_mass_msun = 6.0e10  # Leroy+2008
+disk_scale_length_ly = 16000  # 4.9 kpc, Muñoz-Mateos+2009
+disk_scale_height_ly = 1600   # estimated, hz/hr ≈ 0.1
+bulge_effective_radius_ly = 3300  # 1.0 kpc, estimated (small bulge)
+bulge_to_total = 0.08  # estimated
+arm_morphology = "many loosely-wound arms (grand-design)"
+pitch_angle_deg = 25  # Kennicutt+1981
+
+# NOTE: disk_scale_length = 16 kLY → 8× scale length = 128 kLY,
+# which exceeds the 80k LY clamp in generate_star_catalogue.
+# Density at 80k LY = exp(-80/16) ≈ 0.7% of central, effectively invisible.

@@ -40,6 +40,7 @@ pub struct GalaxyUniform {
     pub camera_target_y: f32,
     pub camera_target_z: f32,
     pub fov_y_deg: f32, // vertical field of view in degrees
+    pub dust_tau: f32,  // dust optical depth at visual wavelengths
 }
 
 const PI: f32 = core::f32::consts::PI;
@@ -546,9 +547,22 @@ fn ray_march_galaxy(px: u32, py: u32, p: &GalaxyUniform) -> Vec3 {
         // calibrated factor.  Individual bright star points are rendered
         // separately by the instanced star pass (plan 012).
         const EMISSIVITY: f32 = 1.5;
-        acc.x += dens * dt * EMISSIVITY;
-        acc.y += dens * dt * EMISSIVITY * 0.9;
-        acc.z += dens * dt * EMISSIVITY * 0.7;
+
+        // Dust extinction: τ(λ) ∝ A_λ/A_V (Cardelli+1989, Rv=3.1).
+        // Red light is least affected, blue most.
+        const DUST_R: f32 = 0.75;
+        const DUST_G: f32 = 1.00;
+        const DUST_B: f32 = 1.32;
+
+        // Accumulate dust column along the ray (traced as dens * dt)
+        let dust_col = dens * dt * p.dust_tau;
+        let ext_r = (-dust_col * DUST_R).exp();
+        let ext_g = (-dust_col * DUST_G).exp();
+        let ext_b = (-dust_col * DUST_B).exp();
+
+        acc.x += dens * dt * EMISSIVITY * ext_r;
+        acc.y += dens * dt * EMISSIVITY * 0.9 * ext_g;
+        acc.z += dens * dt * EMISSIVITY * 0.7 * ext_b;
     }
 
     acc

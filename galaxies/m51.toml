@@ -1,0 +1,23 @@
+# M51 (Whirlpool Galaxy) — Reference Data
+# =================================================
+# Used to calibrate the galaxy-gen `GalaxyParams::m51()` preset.
+
+[identification]
+name = "M51"
+common_name = "Whirlpool Galaxy"
+morphology = "SA(s)bc"
+
+[distance]
+mpc = 7.6   # Vinkó+2012
+mly = 24.8
+
+[structure]
+inclination_deg = 20   # Tully+1988 (nearly face-on)
+stellar_mass_msun = 5.0e10  # Leroy+2008
+disk_scale_length_ly = 8200  # 2.5 kpc, Gutiérrez+2011
+disk_scale_height_ly = 1000  # estimated, hz/hr ≈ 0.12
+bulge_effective_radius_ly = 2300  # 0.7 kpc, Gutiérrez+2011
+bulge_to_total = 0.15  # Gutiérrez+2011
+arm_morphology = "grand-design, two dominant arms"
+pitch_angle_deg = 21  # Kennicutt+1981
+bar_present = true

@@ -8,6 +8,7 @@ pub struct GpuCompute {
     pub module: wgpu::ShaderModule,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub pipeline: wgpu::ComputePipeline,
+    pub scene_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl GpuCompute {
@@ -71,7 +72,40 @@ impl GpuCompute {
             module,
             bind_group_layout,
             pipeline,
+            scene_bind_group: None,
         }
+    }
+
+    /// Return the scene bind group, creating it lazily if needed.
+    /// Must be called after uniform_buffer and rgba_buffer are stable.
+    /// Returns a cloned handle so the caller doesn't hold a borrow on self.
+    pub fn ensure_scene_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        uniform_buffer: &wgpu::Buffer,
+        rgba_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        self.scene_bind_group.get_or_insert_with(|| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("scene"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: rgba_buffer.as_entire_binding(),
+                    },
+                ],
+            })
+        }).clone()
+    }
+
+    /// Drop the cached bind group (call when rgba_buffer is recreated).
+    pub fn invalidate_scene_bind_group(&mut self) {
+        self.scene_bind_group = None;
     }
 }
 
@@ -109,6 +143,7 @@ pub struct GalaxyUniform {
     pub camera_target_y: f32,
     pub camera_target_z: f32,
     pub fov_y_deg: f32,
+    pub dust_tau: f32,
 }
 
 impl GalaxyUniform {
@@ -125,6 +160,7 @@ impl GalaxyUniform {
         camera_pos: (f32, f32, f32),
         camera_target: (f32, f32, f32),
         fov_y_deg: f32,
+        dust_tau: f32,
     ) -> Self {
         Self {
             disk_scale_length: params.disk_scale_length as f32,
@@ -154,6 +190,7 @@ impl GalaxyUniform {
             camera_target_y: camera_target.1,
             camera_target_z: camera_target.2,
             fov_y_deg,
+            dust_tau,
         }
     }
 }
@@ -177,6 +214,7 @@ pub const CATALOGUE_MASS_THRESHOLD: f32 = 0.8;
 ///   pos_x, pos_y, pos_z, mass, temp, lum, _pad
 #[derive(Copy, Clone, Pod, Zeroable)]
 #[repr(C)]
+#[derive(Debug, PartialEq)]
 pub struct StarInstance {
     pub pos_x: f32,
     pub pos_y: f32,
@@ -406,7 +444,6 @@ pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<S
 /// Holds all GPU resources for the instanced star rendering pass.
 pub struct GpuStars {
     pub instance_buffer: wgpu::Buffer,
-    pub instance_count: u32,
     pub bind_group: wgpu::BindGroup,
     pub bind_group_layout: wgpu::BindGroupLayout,
     pub pipeline: wgpu::RenderPipeline,
@@ -553,7 +590,6 @@ impl GpuStars {
 
         Self {
             instance_buffer,
-            instance_count: 0,
             bind_group,
             bind_group_layout,
             pipeline,
@@ -573,7 +609,8 @@ pub fn compute_galaxy(
     queue: &wgpu::Queue,
     compute: &GpuCompute,
     rgba_buffer: &wgpu::Buffer,
-    uniform_buffer: &wgpu::Buffer,
+    _uniform_buffer: &wgpu::Buffer,
+    scene_bind_group: &wgpu::BindGroup,
     image_w: u32,
     image_h: u32,
     target_texture: &wgpu::Texture,
@@ -586,21 +623,6 @@ pub fn compute_galaxy(
     let total = Instant::now();
 
     // ── uniforms (pre-written by caller) ────────────────────
-
-    let scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("scene"),
-        layout: &compute.bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: rgba_buffer.as_entire_binding(),
-            },
-        ],
-    });
 
     // ── dispatch ─────────────────────────────────────────────
 
@@ -616,7 +638,7 @@ pub fn compute_galaxy(
             timestamp_writes: None,
         });
         cpass.set_pipeline(&compute.pipeline);
-        cpass.set_bind_group(0, &scene_bg, &[]);
+        cpass.set_bind_group(0, scene_bind_group, &[]);
         cpass.dispatch_workgroups(thread_group_x, thread_group_y, 1);
     }
 
@@ -737,6 +759,7 @@ mod tests {
             (0.0, 5000.0, 0.0),
             (0.0, 0.0, 0.0),
             45.0,
+            0.2,
         );
 
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
@@ -785,6 +808,7 @@ mod tests {
             (0.0, 5000.0, 0.0),
             (0.0, 0.0, 0.0),
             45.0,
+            0.2,
         );
 
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
@@ -826,6 +850,7 @@ mod tests {
             (0.0, 5000.0, 0.0),
             (0.0, 0.0, 0.0),
             45.0,
+            0.2,
         );
         assert_eq!(uniform.center_x, 5000.0_f32);
         assert_eq!(uniform.center_y, -2000.0_f32);
@@ -853,6 +878,7 @@ mod tests {
             (0.0, 5000.0, 0.0),
             (0.0, 0.0, 0.0),
             45.0,
+            0.2,
         );
         let _bytes: &[u8] = bytemuck::bytes_of(&uniform);
         // If this compiles and doesn't panic, Pod+Zeroable is satisfied
@@ -861,7 +887,7 @@ mod tests {
     #[test]
     fn uniform_struct_size_matches_fields() {
         // Runtime size check as a cross-check against shader-side layout mismatch
-        let expected = std::mem::size_of::<f32>() * 23 + std::mem::size_of::<u32>() * 4;
+        let expected = std::mem::size_of::<f32>() * 24 + std::mem::size_of::<u32>() * 4;
         assert_eq!(std::mem::size_of::<GalaxyUniform>(), expected);
     }
 
@@ -1197,7 +1223,7 @@ mod tests {
 
         assert_eq!(
             size_of::<GalaxyUniform>(),
-            108,
+            112,
             "overall size mismatch with shader"
         );
 
@@ -1228,6 +1254,7 @@ mod tests {
         assert_eq!(offset_of!(GalaxyUniform, camera_target_y), 96);
         assert_eq!(offset_of!(GalaxyUniform, camera_target_z), 100);
         assert_eq!(offset_of!(GalaxyUniform, fov_y_deg), 104);
+        assert_eq!(offset_of!(GalaxyUniform, dust_tau), 108);
     }
 
     // ── New star colour tests ─────────────────────────
@@ -1498,9 +1525,111 @@ mod tests {
             (0.0, 5000.0, 0.0),
             (0.0, 0.0, 0.0),
             45.0,
+            0.2,
         );
         assert_eq!(uniform.render_mode, 0);
         assert_eq!(uniform.fov_y_deg, 45.0);
         assert!(uniform.camera_y > 0.0, "camera should be above the disk");
+    }
+
+    // ── Star catalogue characterisation tests ────────────────
+
+    /// Star catalogue is deterministic: same params + seed → identical output.
+    #[test]
+    fn star_catalogue_deterministic() {
+        let params = GalaxyParams::milky_way();
+        let a = generate_star_catalogue(&params, 500);
+        let b = generate_star_catalogue(&params, 500);
+        assert_eq!(a, b);
+    }
+
+    /// No NaN or infinite values in any star field.
+    #[test]
+    fn star_catalogue_no_nan_or_infinite() {
+        let catalogue = generate_star_catalogue(&GalaxyParams::milky_way(), 1000);
+        for star in &catalogue {
+            assert!(star.pos_x.is_finite());
+            assert!(star.pos_y.is_finite());
+            assert!(star.pos_z.is_finite());
+            assert!(star.mass.is_finite());
+            assert!(star.temp.is_finite());
+            assert!(star.lum.is_finite());
+        }
+    }
+
+    /// Each star has physically plausible mass, temperature, and luminosity.
+    #[test]
+    fn star_catalogue_stars_within_physical_bounds() {
+        let catalogue = generate_star_catalogue(&GalaxyParams::milky_way(), 1000);
+        assert_eq!(catalogue.len(), 1000);
+        for star in &catalogue {
+            assert!(star.mass > 0.08 && star.mass < 100.0,
+                "mass {} out of range", star.mass);
+            assert!(star.temp >= 2300.0 && star.temp <= 50000.0,
+                "temp {} out of range", star.temp);
+            assert!(star.lum > 0.0, "lum {} <= 0", star.lum);
+        }
+    }
+
+    /// Star positions span the full disc (at least 40k LY in extent).
+    #[test]
+    fn star_catalogue_spatial_extent() {
+        let catalogue = generate_star_catalogue(&GalaxyParams::milky_way(), 10_000);
+        let (mut x_min, mut x_max) = (f32::MAX, f32::MIN);
+        let (mut z_min, mut z_max) = (f32::MAX, f32::MIN);
+        for star in &catalogue {
+            x_min = x_min.min(star.pos_x);
+            x_max = x_max.max(star.pos_x);
+            z_min = z_min.min(star.pos_z);
+            z_max = z_max.max(star.pos_z);
+        }
+        assert!(x_max - x_min > 40_000.0, "x span {} too small", x_max - x_min);
+        assert!(z_max - z_min > 40_000.0, "z span {} too small", z_max - z_min);
+        assert!(x_min < -20_000.0 && x_max > 20_000.0, "x range {}..{} not spanning origin", x_min, x_max);
+        assert!(z_min < -20_000.0 && z_max > 20_000.0, "z range {}..{} not spanning origin", z_min, z_max);
+    }
+
+    /// Bulge region is significantly enriched over the outer disc.
+    #[test]
+    fn star_catalogue_bulge_enriched_over_outer_disc() {
+        let params = GalaxyParams::milky_way();
+        let catalogue = generate_star_catalogue(&params, 10_000);
+        let centre_count = catalogue.iter()
+            .filter(|s| s.pos_x.powi(2) + s.pos_z.powi(2) < 5000.0_f32.powi(2))
+            .count() as f64;
+        let outer_count = catalogue.iter()
+            .filter(|s| {
+                let r = (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt();
+                r > 40_000.0 && r < 45_000.0
+            })
+            .count() as f64;
+        let centre_density = centre_count / (std::f64::consts::PI * 5000.0_f64.powi(2));
+        let outer_area = std::f64::consts::PI * (45_000.0_f64.powi(2) - 40_000.0_f64.powi(2));
+        let outer_density = outer_count / outer_area;
+        let ratio = centre_density / outer_density;
+        assert!(ratio > 10.0, "bulge enrichment ratio {} should exceed 10", ratio);
+    }
+
+    /// Different presets produce different catalogues.
+    #[test]
+    fn star_catalogue_different_presets_differ() {
+        let mw = generate_star_catalogue(&GalaxyParams::milky_way(), 500);
+        let ngc = generate_star_catalogue(&GalaxyParams::ngc628(), 500);
+        assert_ne!(mw, ngc, "catalogues for different presets should differ");
+    }
+
+    /// NGC 628 has larger disk scale length → catalogue extends further than Milky Way.
+    #[test]
+    fn star_catalogue_ngc628_more_extended_than_milky_way() {
+        let mw = generate_star_catalogue(&GalaxyParams::milky_way(), 5000);
+        let ngc = generate_star_catalogue(&GalaxyParams::ngc628(), 5000);
+        let mw_extent = mw.iter()
+            .map(|s| (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt())
+            .fold(0.0_f32, f32::max);
+        let ngc_extent = ngc.iter()
+            .map(|s| (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt())
+            .fold(0.0_f32, f32::max);
+        assert!(ngc_extent > mw_extent,
+            "NGC 628 extent {} should exceed MW extent {}", ngc_extent, mw_extent);
     }
 }

@@ -1,0 +1,22 @@
+# M31 (Andromeda Galaxy) — Reference Data
+# =================================================
+# Used to calibrate the galaxy-gen `GalaxyParams::m31()` preset.
+
+[identification]
+name = "M31"
+common_name = "Andromeda Galaxy"
+morphology = "SA(s)b"
+
+[distance]
+mpc = 0.78   # McConnachie+2005
+mly = 2.54
+
+[structure]
+inclination_deg = 77   # de Vaucouleurs+1991 (face-on = 90°)
+stellar_mass_msun = 1.1e11  # Tamm+2012
+disk_scale_length_ly = 17600  # 5.4 kpc, Courteau+2011
+disk_scale_height_ly = 1300   # estimated, hz/hr ≈ 0.075
+bulge_effective_radius_ly = 3300  # 1.0 kpc, Courteau+2011
+bulge_to_total = 0.3  # Courteau+2011
+arm_morphology = "weak, flocculent"
+pitch_angle_deg = 7

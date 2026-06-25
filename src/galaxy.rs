@@ -130,6 +130,91 @@ impl GalaxyParams {
             halo_slope: -3.5,
         }
     }
+
+    /// M31 (Andromeda Galaxy) — our nearest large spiral neighbour.
+    ///
+    /// Massive (M★ ≈ 1.1×10¹¹ M☉), prominent bulge (B/T ≈ 0.3), and
+    /// weak flocculent spiral arms.  Inclination ~77°.
+    ///
+    /// References: McConnachie+2005 (distance), Tamm+2012 (mass),
+    /// Courteau+2011 (decomposition).
+    pub fn m31() -> Self {
+        Self {
+            disk_scale_length: 17_600.0,
+            disk_scale_height: 1_300.0,
+            // n₀ ≈ M★×(1-B/T) / (2π hr² · 2hz · ⟨m⟩)
+            //   ≈ 1.1e11·0.7 / (2π·17600²·2600·7.4) ≈ 0.0009
+            disk_central_density: 9.0e-4,
+            arm_count: 2,
+            arm_pitch: 0.12, // ~7°
+            arm_concentration: 3.0,
+            arm_strength: 0.4, // weak arms
+            bulge_radius: 3_300.0,
+            // n₀ = 3·M★·B/T / (4π·a³ · ⟨m⟩)
+            //   ≈ 3·1.1e11·0.3 / (4π·3300³·7.4) ≈ 0.030
+            bulge_central_density: 3.0e-2,
+            halo_radius: 90_000.0,
+            halo_central_density: 8.0e-8,
+            halo_slope: -3.5,
+        }
+    }
+
+    /// M51 (Whirlpool Galaxy) — classic grand-design spiral.
+    ///
+    /// Nearly face-on (i ≈ 20°), two dominant arms, high pitch angle (~21°),
+    /// interacting with companion NGC 5195.  Strong arm contrast.
+    ///
+    /// References: Vinkó+2012 (distance), Leroy+2008 (mass),
+    /// Gutiérrez+2011 (decomposition), Kennicutt+1981 (pitch angle).
+    pub fn m51() -> Self {
+        Self {
+            disk_scale_length: 8_200.0,
+            disk_scale_height: 1_000.0,
+            // n₀ ≈ M★×(1-B/T) / (2π hr² · 2hz · ⟨m⟩)
+            //   ≈ 5e10·0.85 / (2π·8200²·2000·7.4) ≈ 0.0054
+            disk_central_density: 5.4e-3,
+            arm_count: 2,
+            arm_pitch: 0.37, // ~21°
+            arm_concentration: 6.0,
+            arm_strength: 2.0, // strong arms
+            bulge_radius: 2_300.0,
+            // n₀ = 3·M★·B/T / (4π·a³ · ⟨m⟩)
+            //   ≈ 3·5e10·0.15 / (4π·2300³·7.4) ≈ 0.019
+            bulge_central_density: 1.9e-2,
+            halo_radius: 60_000.0,
+            halo_central_density: 5.0e-8,
+            halo_slope: -3.5,
+        }
+    }
+
+    /// M101 (Pinwheel Galaxy) — large, face-on late-type spiral.
+    ///
+    /// Large scale length (~16 kLY), many loosely-wound arms, low surface
+    /// brightness.  Small bulge (B/T ≈ 0.08).  Tests the renderer's
+    /// dynamic range due to extreme scale length.
+    ///
+    /// References: Shappee+Stanford 2018 (distance), Leroy+2008 (mass),
+    /// Muñoz-Mateos+2009 (scale length).
+    pub fn m101() -> Self {
+        Self {
+            disk_scale_length: 16_000.0,
+            disk_scale_height: 1_600.0,
+            // n₀ ≈ M★×(1-B/T) / (2π hr² · 2hz · ⟨m⟩)
+            //   ≈ 6e10·0.92 / (2π·16000²·3200·7.4) ≈ 0.0014
+            disk_central_density: 1.4e-3,
+            arm_count: 4,
+            arm_pitch: 0.44, // ~25°
+            arm_concentration: 4.0,
+            arm_strength: 1.0,
+            bulge_radius: 3_300.0,
+            // n₀ = 3·M★·B/T / (4π·a³ · ⟨m⟩)
+            //   ≈ 3·6e10·0.08 / (4π·3300³·7.4) ≈ 0.005
+            bulge_central_density: 5.0e-3,
+            halo_radius: 100_000.0,
+            halo_central_density: 4.0e-8,
+            halo_slope: -3.5,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +340,86 @@ mod tests {
         assert!(
             ratio < 10.0,
             "ngc628 bulge/disk column ratio {ratio:.3} should be < 10"
+        );
+    }
+
+    // ── M31 tests ──
+
+    #[test]
+    fn m31_params_are_finite() {
+        let p = GalaxyParams::m31();
+        assert!(p.disk_scale_length.is_finite() && p.disk_scale_length > 0.0);
+        assert!(p.disk_scale_height.is_finite() && p.disk_scale_height > 0.0);
+        assert!(p.disk_central_density.is_finite() && p.disk_central_density > 0.0);
+        assert!(p.arm_count > 0);
+        assert!(p.bulge_radius.is_finite() && p.bulge_radius > 0.0);
+        assert!(
+            p.bulge_central_density.is_finite() && p.bulge_central_density > 0.0
+        );
+    }
+
+    #[test]
+    fn m31_disk_larger_than_milky_way() {
+        assert!(
+            GalaxyParams::m31().disk_scale_length
+                > GalaxyParams::milky_way().disk_scale_length
+        );
+    }
+
+    #[test]
+    fn m31_bulge_is_massive_relative_to_disk() {
+        let p = GalaxyParams::m31();
+        let bulge_col = (4.0 / 3.0) * p.bulge_radius * p.bulge_central_density;
+        let disk_col = 2.0 * p.disk_scale_height * p.disk_central_density;
+        let ratio = bulge_col / disk_col;
+        assert!(ratio > 8.0, "M31 bulge/disk column ratio {ratio:.3} should be > 8");
+    }
+
+    // ── M51 tests ──
+
+    #[test]
+    fn m51_params_are_finite() {
+        let p = GalaxyParams::m51();
+        assert!(p.disk_scale_length.is_finite() && p.disk_scale_length > 0.0);
+        assert!(p.disk_scale_height.is_finite() && p.disk_scale_height > 0.0);
+        assert!(p.disk_central_density.is_finite() && p.disk_central_density > 0.0);
+        assert!(p.arm_count > 0);
+        assert!(p.bulge_radius.is_finite() && p.bulge_radius > 0.0);
+        assert!(
+            p.bulge_central_density.is_finite() && p.bulge_central_density > 0.0
+        );
+    }
+
+    #[test]
+    fn m51_arms_are_tight() {
+        // M51 has high pitch angle (~21°) → arm_pitch should be > 0.25
+        assert!(
+            GalaxyParams::m51().arm_pitch > 0.25,
+            "M51 should have open arms"
+        );
+    }
+
+    // ── M101 tests ──
+
+    #[test]
+    fn m101_params_are_finite() {
+        let p = GalaxyParams::m101();
+        assert!(p.disk_scale_length.is_finite() && p.disk_scale_length > 0.0);
+        assert!(p.disk_scale_height.is_finite() && p.disk_scale_height > 0.0);
+        assert!(p.disk_central_density.is_finite() && p.disk_central_density > 0.0);
+        assert!(p.arm_count > 0);
+        assert!(p.bulge_radius.is_finite() && p.bulge_radius > 0.0);
+        assert!(
+            p.bulge_central_density.is_finite() && p.bulge_central_density > 0.0
+        );
+    }
+
+    #[test]
+    fn m101_disk_is_large() {
+        // M101 has a very large scale length (~16 kLY)
+        assert!(
+            GalaxyParams::m101().disk_scale_length > 15_000.0,
+            "M101 disk should be very extended"
         );
     }
 }
