@@ -314,15 +314,21 @@ fn mass_to_lum_f64(m: f64) -> f64 {
 /// IMF sampling and column density to decide whether each cell contains
 /// a bright star, and assigns a vertical offset from sech² profile.
 ///
-/// All candidates are collected then sorted by a hash-derived key,
-/// so the first `max_stars` are a uniform deterministic sample across
-/// the full disc (no scan-order bias).
+/// Candidates are selected via weighted random sampling (A-Res):
+/// each star gets key = –ln(hash) / column_density; sorting by
+/// key and taking the top `max_stars` preserves the exponential
+/// disk profile, bulge concentration, and spiral structure in the
+/// resulting point cloud.
 pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<StarInstance> {
-    let disc_radius = 50_000.0_f64;
+    // Extend to 8 disk scale lengths so the exponential tail fades
+    // naturally before the cutoff (Σ/Σ₀ ≈ e⁻⁸ ≈ 0.03 %).
+    // Capped at 80 kLY to bound the scan grid for large galaxies.
+    let disc_radius = (8.0 * params.disk_scale_length).clamp(50_000.0, 80_000.0);
     let half_side = (disc_radius / CATALOGUE_CELL_SIZE as f64).ceil() as i32;
 
     struct Candidate {
-        key: u32,
+        /// Weighted-reservoir key: smaller = higher priority.
+        key: f64,
         star: StarInstance,
     }
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -370,10 +376,15 @@ pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<S
             let u_y = ((hy >> 8) as f64 / 16777215.0).clamp(0.001, 0.999);
             let y_offset = 2.0 * params.disk_scale_height * (2.0 * u_y - 1.0).atanh();
 
-            let sort_key = hash3_host(cx, cz, 99991u32);
+            // Weighted-reservoir key (A-Res): –ln(uniform) / density
+            // Cells with higher column density produce smaller keys,
+            // so they dominate the top-k selection.
+            let key_hash = hash3_host(cx, cz, 99991u32);
+            let key_u = (key_hash as f64 / u32::MAX as f64).max(1e-12);
+            let key = -key_u.ln() / col;
 
             candidates.push(Candidate {
-                key: sort_key,
+                key,
                 star: StarInstance {
                     pos_x: (wx + jx) as f32,
                     pos_y: y_offset as f32,
@@ -387,7 +398,7 @@ pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<S
         }
     }
 
-    candidates.sort_unstable_by_key(|c| c.key);
+    candidates.sort_unstable_by(|a, b| a.key.partial_cmp(&b.key).unwrap());
     candidates.truncate(max_stars);
     candidates.into_iter().map(|c| c.star).collect()
 }
