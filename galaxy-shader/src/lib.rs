@@ -47,11 +47,7 @@ const TAU: f32 = 2.0 * PI;
 
 fn rem_euclid(x: f32, y: f32) -> f32 {
     let r = x % y;
-    if r < 0.0 {
-        r + y
-    } else {
-        r
-    }
+    if r < 0.0 { r + y } else { r }
 }
 
 // ── Column density (stars / ly²) ───────────────────────────

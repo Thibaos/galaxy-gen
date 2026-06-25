@@ -9,6 +9,8 @@ struct CameraUniform {
 
 struct StarParams {
     brightness: f32,
+    aspect: f32,
+    star_size: f32,
 }
 
 // Each star uses 7 u32 words (packed as f32 bit patterns)
@@ -58,9 +60,10 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let world_pos = vec3<f32>(px, py, pz);
     let clip_center = camera.view_proj * vec4<f32>(world_pos, 1.0);
 
-    // Point size in clip-space: scale with mass
-    let size_clip = 0.004 + 0.012 * log2(max(mass, 0.1) + 0.5);
-    let offset = CORNERS[in.corner] * size_clip;
+    // Point size in clip-space: scale with log-mass, correct X for aspect
+    let size_clip = star_params.star_size * (0.008 + 0.025 * log2(max(mass, 0.1) + 0.5));
+    var offset = CORNERS[in.corner] * size_clip;
+    offset.x /= star_params.aspect;
 
     var out: VertexOutput;
     out.position = vec4<f32>(
@@ -120,8 +123,8 @@ fn temperature_to_rgb(t_kelvin: f32) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Soft circular profile: alpha fades from center to edge
+    // Soft circular profile: falloff sharper near edge for less blur
     let dist = length(in.uv);
-    let falloff = 1.0 - smoothstep(0.0, 1.0, dist);
+    let falloff = 1.0 - smoothstep(0.6, 1.0, dist);
     return vec4<f32>(in.color.rgb, in.color.a * falloff);
 }

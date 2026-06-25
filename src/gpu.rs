@@ -163,7 +163,7 @@ impl GalaxyUniform {
 // ═══════════════════════════════════════════════════════════
 
 /// Maximum number of stars in the catalogue buffer.
-pub const MAX_STARS: u32 = 65536;
+pub const MAX_STARS: u32 = 65536 * 8;
 
 /// Coarse cell size for catalogue scan (light-years).
 pub const CATALOGUE_CELL_SIZE: f32 = 50.0;
@@ -313,10 +313,19 @@ fn mass_to_lum_f64(m: f64) -> f64 {
 /// Scans a coarse grid over the galaxy's XZ plane, uses hash-based
 /// IMF sampling and column density to decide whether each cell contains
 /// a bright star, and assigns a vertical offset from sech² profile.
+///
+/// All candidates are collected then sorted by a hash-derived key,
+/// so the first `max_stars` are a uniform deterministic sample across
+/// the full disc (no scan-order bias).
 pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<StarInstance> {
     let disc_radius = 50_000.0_f64;
     let half_side = (disc_radius / CATALOGUE_CELL_SIZE as f64).ceil() as i32;
-    let mut stars = Vec::with_capacity(max_stars);
+
+    struct Candidate {
+        key: u32,
+        star: StarInstance,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
 
     for ix in -half_side..=half_side {
         for iz in -half_side..=half_side {
@@ -361,22 +370,26 @@ pub fn generate_star_catalogue(params: &GalaxyParams, max_stars: usize) -> Vec<S
             let u_y = ((hy >> 8) as f64 / 16777215.0).clamp(0.001, 0.999);
             let y_offset = 2.0 * params.disk_scale_height * (2.0 * u_y - 1.0).atanh();
 
-            stars.push(StarInstance {
-                pos_x: (wx + jx) as f32,
-                pos_y: y_offset as f32,
-                pos_z: (wz + jz) as f32,
-                mass,
-                temp: temp as f32,
-                lum: lum as f32,
-                _pad: 0,
-            });
+            let sort_key = hash3_host(cx, cz, 99991u32);
 
-            if stars.len() >= max_stars {
-                return stars;
-            }
+            candidates.push(Candidate {
+                key: sort_key,
+                star: StarInstance {
+                    pos_x: (wx + jx) as f32,
+                    pos_y: y_offset as f32,
+                    pos_z: (wz + jz) as f32,
+                    mass,
+                    temp: temp as f32,
+                    lum: lum as f32,
+                    _pad: 0,
+                },
+            });
         }
     }
-    stars
+
+    candidates.sort_unstable_by_key(|c| c.key);
+    candidates.truncate(max_stars);
+    candidates.into_iter().map(|c| c.star).collect()
 }
 
 /// Holds all GPU resources for the instanced star rendering pass.

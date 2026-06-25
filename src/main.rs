@@ -88,6 +88,7 @@ struct App {
     show_stars: bool,
     show_glow: bool,
     star_brightness: f32,
+    star_size: f32,
     star_catalogue: Vec<gpu::StarInstance>,
     star_catalogue_dirty: bool,
 }
@@ -139,6 +140,7 @@ impl App {
             show_stars: true,
             show_glow: true,
             star_brightness: 0.3,
+            star_size: 1.0,
             star_catalogue: Vec::new(),
             star_catalogue_dirty: true,
         }
@@ -154,11 +156,29 @@ impl App {
 
     fn ensure_star_catalogue(&mut self) {
         if self.star_catalogue_dirty {
-            self.star_catalogue = gpu::generate_star_catalogue(
-                &self.params,
-                gpu::MAX_STARS as usize,
-            );
-            println!("Star catalogue: {} stars", self.star_catalogue.len());
+            self.star_catalogue =
+                gpu::generate_star_catalogue(&self.params, gpu::MAX_STARS as usize);
+            // Debug: print spatial extent
+            if !self.star_catalogue.is_empty() {
+                let mut min_x = f32::MAX;
+                let mut max_x = f32::MIN;
+                let mut min_z = f32::MAX;
+                let mut max_z = f32::MIN;
+                for s in &self.star_catalogue {
+                    min_x = min_x.min(s.pos_x);
+                    max_x = max_x.max(s.pos_x);
+                    min_z = min_z.min(s.pos_z);
+                    max_z = max_z.max(s.pos_z);
+                }
+                println!(
+                    "Star catalogue: {} stars, X=[{:.0}, {:.0}], Z=[{:.0}, {:.0}]",
+                    self.star_catalogue.len(),
+                    min_x,
+                    max_x,
+                    min_z,
+                    max_z,
+                );
+            }
             self.star_catalogue_dirty = false;
         }
     }
@@ -167,7 +187,9 @@ impl App {
         let cam_pos = self.camera_position();
         let eye = glam::Vec3::new(cam_pos.0, cam_pos.1, cam_pos.2);
         let target = glam::Vec3::new(
-            self.camera_target_x, self.camera_target_y, self.camera_target_z,
+            self.camera_target_x,
+            self.camera_target_y,
+            self.camera_target_z,
         );
         let mut up = glam::Vec3::Y;
 
@@ -183,9 +205,18 @@ impl App {
         let proj = glam::Mat4::perspective_rh(fov_rad, aspect, 100.0, 1_000_000.0);
         let vp = proj * view;
 
-        // Star brightness uniform (f32 at offset 0; followed by 3x f32 padding for alignment)
-        let brightness: [f32; 4] = [self.star_brightness, 0.0, 0.0, 0.0];
-        queue.write_buffer(&gpu_stars.brightness_buffer, 0, bytemuck::cast_slice(&brightness));
+        // Star params uniform (vec4 layout: brightness, aspect, star_size, _pad)
+        let star_uniform: [f32; 4] = [
+            self.star_brightness,
+            self.render_w as f32 / self.render_h as f32,
+            self.star_size,
+            0.0,
+        ];
+        queue.write_buffer(
+            &gpu_stars.brightness_buffer,
+            0,
+            bytemuck::cast_slice(&star_uniform),
+        );
 
         queue.write_buffer(
             &gpu_stars.camera_buffer,
@@ -596,8 +627,10 @@ impl App {
                     }
                     if self.render_mode == 1 {
                         let dist_changed = ui
-                            .add(egui::Slider::new(&mut self.camera_dist, 5_000.0..=500_000.0)
-                                .text("Distance (ly)"))
+                            .add(
+                                egui::Slider::new(&mut self.camera_dist, 5_000.0..=500_000.0)
+                                    .text("Distance (ly)"),
+                            )
                             .changed();
                         let fov_changed = ui
                             .add(egui::Slider::new(&mut self.fov_y, 5.0..=120.0).text("FOV"))
@@ -609,10 +642,24 @@ impl App {
                             .add(egui::Checkbox::new(&mut self.show_stars, "Show Stars"))
                             .changed();
                         let brightness_changed = ui
-                            .add(egui::Slider::new(&mut self.star_brightness, 0.0..=2.0)
-                                .text("Star brightness"))
+                            .add(
+                                egui::Slider::new(&mut self.star_brightness, 0.0..=2.0)
+                                    .text("Star brightness"),
+                            )
                             .changed();
-                        if dist_changed || fov_changed || glow_changed || stars_changed || brightness_changed {
+                        let size_changed = ui
+                            .add(
+                                egui::Slider::new(&mut self.star_size, 0.01..=1.0)
+                                    .text("Star size"),
+                            )
+                            .changed();
+                        if dist_changed
+                            || fov_changed
+                            || glow_changed
+                            || stars_changed
+                            || brightness_changed
+                            || size_changed
+                        {
                             self.needs_render = true;
                         }
                     }
@@ -671,7 +718,11 @@ impl App {
 
         // Pre-compute camera values to avoid borrow conflicts
         let cam_pos = self.camera_position();
-        let cam_target = (self.camera_target_x, self.camera_target_y, self.camera_target_z);
+        let cam_target = (
+            self.camera_target_x,
+            self.camera_target_y,
+            self.camera_target_z,
+        );
         let render_mode = self.render_mode;
         let fov_y = self.fov_y;
         let show_glow = self.show_glow;
@@ -729,18 +780,10 @@ impl App {
             let mut header = [0u32; 2];
             header[0] = self.star_catalogue.len() as u32;
             header[1] = gpu::MAX_STARS;
-            queue.write_buffer(
-                &gpu_stars.instance_buffer,
-                0,
-                bytemuck::cast_slice(&header),
-            );
+            queue.write_buffer(&gpu_stars.instance_buffer, 0, bytemuck::cast_slice(&header));
             // Write star data at byte offset 8
             let data_bytes = bytemuck::cast_slice(&self.star_catalogue);
-            queue.write_buffer(
-                &gpu_stars.instance_buffer,
-                8,
-                data_bytes,
-            );
+            queue.write_buffer(&gpu_stars.instance_buffer, 8, data_bytes);
         }
 
         let frame = match surface.get_current_texture() {
@@ -762,13 +805,18 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Pre-extract star draw data before render pass to avoid borrow conflicts
-        let star_draw_data = if self.render_mode == 1 && self.show_stars && !self.star_catalogue.is_empty() {
-            let gpu_stars = self.gpu_stars.as_ref().unwrap();
-            let n = self.star_catalogue.len();
-            Some((&gpu_stars.pipeline, &gpu_stars.bind_group as &wgpu::BindGroup, n))
-        } else {
-            None
-        };
+        let star_draw_data =
+            if self.render_mode == 1 && self.show_stars && !self.star_catalogue.is_empty() {
+                let gpu_stars = self.gpu_stars.as_ref().unwrap();
+                let n = self.star_catalogue.len();
+                Some((
+                    &gpu_stars.pipeline,
+                    &gpu_stars.bind_group as &wgpu::BindGroup,
+                    n,
+                ))
+            } else {
+                None
+            };
 
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -838,8 +886,6 @@ impl App {
             let q = self.queue.as_ref().unwrap();
             self.save_snapshot(dev, q);
         }
-
-
     }
 
     fn save_snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -980,12 +1026,17 @@ impl ApplicationHandler for App {
                     self.needs_render = true;
                 }
 
-                if self.orbit_dragging && self.render_mode == 1 && !self.egui_ctx.wants_pointer_input() {
+                if self.orbit_dragging
+                    && self.render_mode == 1
+                    && !self.egui_ctx.wants_pointer_input()
+                {
                     let dx = cx - lx;
                     let dy = cy - ly;
                     self.camera_azimuth -= dx as f32 * 0.005;
-                    self.camera_elevation = (self.camera_elevation + dy as f32 * 0.005)
-                        .clamp(-std::f32::consts::FRAC_PI_2 + 0.01, std::f32::consts::FRAC_PI_2 - 0.01);
+                    self.camera_elevation = (self.camera_elevation + dy as f32 * 0.005).clamp(
+                        -std::f32::consts::FRAC_PI_2 + 0.01,
+                        std::f32::consts::FRAC_PI_2 - 0.01,
+                    );
                     self.needs_render = true;
                 }
             }
@@ -1006,8 +1057,8 @@ impl ApplicationHandler for App {
 
                 if self.render_mode == 1 {
                     let factor = if scroll > 0.0 { 1.0 / 1.1_f64 } else { 1.1_f64 };
-                    self.camera_dist = (self.camera_dist as f64 * factor)
-                        .clamp(5_000.0, 500_000.0) as f32;
+                    self.camera_dist =
+                        (self.camera_dist as f64 * factor).clamp(5_000.0, 500_000.0) as f32;
                     self.needs_render = true;
                 } else {
                     let old_extent = self.extent_ly;
