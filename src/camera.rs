@@ -57,6 +57,29 @@ impl Camera {
         )
     }
 
+    /// Orthographic projection for 2D top-down mode.
+    /// Maps world XZ coords to clip space. Y (height) is unused in 2D.
+    pub fn ortho_proj_matrix(
+        extent_x: f32,
+        extent_y: f32,
+        center_x: f32,
+        center_y: f32,
+        near: f32,
+        far: f32,
+    ) -> glam::Mat4 {
+        let left = center_x - extent_x * 0.5;
+        let right = center_x + extent_x * 0.5;
+        let bottom = center_y - extent_y * 0.5;
+        let top = center_y + extent_y * 0.5;
+        // Camera looks down Y axis (from +Y toward XZ plane)
+        let eye = glam::Vec3::new(0.0, far * 0.5, 0.0);
+        let target = glam::Vec3::new(0.0, 0.0, 0.0);
+        let up = glam::Vec3::NEG_Z; // Z = up on screen
+        let view = glam::Mat4::look_at_rh(eye, target, up);
+        let proj = glam::Mat4::orthographic_rh(left, right, bottom, top, near, far);
+        proj * view
+    }
+
     /// View-projection matrix for the given aspect ratio.
     pub fn view_proj_matrix(&self, aspect: f32) -> glam::Mat4 {
         let eye = self.position();
@@ -100,6 +123,33 @@ impl Default for Camera {
             elevation: std::f32::consts::FRAC_PI_2 - 0.05,
             target: glam::Vec3::ZERO,
             fov_y_deg: FOV_DEFAULT,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ortho_proj_matrix_sanity() {
+        // Center (0,0), extent 100, near=0, far=1000
+        let m = Camera::ortho_proj_matrix(100.0, 100.0, 0.0, 0.0, 0.0, 1000.0);
+        // Test that corners of the viewport map to ±1 in clip space
+        let corners = [
+            (50.0, 50.0),   // top-right
+            (-50.0, 50.0),  // top-left
+            (50.0, -50.0),  // bottom-right
+            (-50.0, -50.0), // bottom-left
+        ];
+        for (x, z) in &corners {
+            let clip = m * glam::Vec4::new(*x, 0.0, *z, 1.0);
+            let ndc = clip.truncate() / clip.w;
+            assert!(
+                ndc.x.abs() <= 1.0 + 1e-5 && ndc.z.abs() <= 1.0 + 1e-5,
+                "corner ({x}, {z}) maps to NDC ({}, {}) outside [-1,1]",
+                ndc.x, ndc.z
+            );
         }
     }
 }

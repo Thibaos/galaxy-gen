@@ -38,10 +38,6 @@ pub struct App {
     pub extent_ly: f64,
     pub needs_render: bool,
 
-    // brightness
-    pub exposure: f32,
-    pub contrast: f32,
-
     // compute pipeline (cached)
     pub gpu_compute: Option<gpu::GpuCompute>,
     pub uniform_buffer: Option<wgpu::Buffer>,
@@ -58,24 +54,19 @@ pub struct App {
     pub input: InputState,
 
     // 3D mode
-    pub render_mode: u32,
+    pub is_3d: bool,
     pub camera: Camera,
 
     // instanced stars
     pub gpu_stars: Option<gpu::GpuStars>,
-    pub show_stars: bool,
-    pub show_glow: bool,
-    pub star_brightness: f32,
+    pub star_brightness_2d: f32,
     pub star_size: f32,
     pub star_catalogue: Vec<gpu::StarInstance>,
     pub star_catalogue_dirty: bool,
     pub star_catalogue_uploaded: bool,
-    pub dust_tau: f32,
 }
 
 pub const INITIAL_EXTENT_LY: f64 = 512_000.0;
-pub const DEFAULT_EXPOSURE: f32 = 0.25;
-pub const DEFAULT_CONTRAST: f32 = 0.04;
 
 impl App {
     pub fn new(params: GalaxyParams) -> Self {
@@ -100,8 +91,6 @@ impl App {
             center_y: 0.0,
             extent_ly: INITIAL_EXTENT_LY,
             needs_render: true,
-            exposure: DEFAULT_EXPOSURE,
-            contrast: DEFAULT_CONTRAST,
             gpu_compute: None,
             uniform_buffer: None,
             rgba_buffer: None,
@@ -111,17 +100,14 @@ impl App {
             egui_state: None,
             egui_renderer: None,
             input: InputState::default(),
-            render_mode: 0,
+            is_3d: false,
             camera: Camera::default(),
             gpu_stars: None,
-            show_stars: true,
-            show_glow: true,
-            star_brightness: 0.3,
-            star_size: 1.0,
+            star_brightness_2d: 1.0,
+            star_size: 0.05,
             star_catalogue: Vec::new(),
             star_catalogue_dirty: true,
             star_catalogue_uploaded: false,
-            dust_tau: 0.2,
         }
     }
 
@@ -298,14 +284,6 @@ impl App {
         self.recreate_texture();
     }
 
-    pub fn update_title(&self) {
-        if let Some(window) = &self.window {
-            window.set_title(&format!(
-                "Galaxy Gen — exp: {:.3}  con: {:.4}",
-                self.exposure, self.contrast
-            ));
-        }
-    }
 
     pub fn recreate_texture(&mut self) {
         let device = self.device.as_ref().unwrap();
@@ -384,27 +362,6 @@ impl App {
         }
     }
 
-    pub fn write_view_proj_matrix(&self, queue: &wgpu::Queue, gpu_stars: &gpu::GpuStars) {
-        let vp = self.camera.view_proj_matrix(self.render_w as f32 / self.render_h as f32);
-
-        let star_uniform: [f32; 4] = [
-            self.star_brightness,
-            self.render_w as f32 / self.render_h as f32,
-            self.star_size,
-            0.0,
-        ];
-
-        queue.write_buffer(
-            &gpu_stars.camera_buffer,
-            0,
-            bytemuck::cast_slice(&vp.to_cols_array()),
-        );
-        queue.write_buffer(
-            &gpu_stars.brightness_buffer,
-            0,
-            bytemuck::cast_slice(&star_uniform),
-        );
-    }
 
     pub fn save_snapshot(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let render_w = self.render_w;

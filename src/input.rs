@@ -1,13 +1,10 @@
 use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
-    keyboard::{KeyCode, PhysicalKey},
 };
 
 use crate::app::App;
 
-const EXPOSURE_STEP: f32 = 0.02;
-const CONTRAST_STEP: f32 = 0.002;
 const ZOOM_2D_SPEED: f64 = 1.1;
 const MIN_EXTENT_LY: f64 = 10.0;
 const MAX_EXTENT_LY: f64 = 2_000_000.0;
@@ -63,30 +60,13 @@ pub fn handle_window_event(
             }
         }
 
-        WindowEvent::KeyboardInput { event: ke, .. } => {
-            if ke.state.is_pressed()
-                && !app.egui_ctx.wants_keyboard_input()
-                && let PhysicalKey::Code(key) = ke.physical_key
-            {
-                match key {
-                    KeyCode::ArrowLeft => app.exposure -= EXPOSURE_STEP,
-                    KeyCode::ArrowRight => app.exposure += EXPOSURE_STEP,
-                    KeyCode::ArrowUp => app.contrast += CONTRAST_STEP,
-                    KeyCode::ArrowDown => app.contrast -= CONTRAST_STEP,
-                    _ => return,
-                }
-                app.update_title();
-                app.needs_render = true;
-            }
-        }
-
         WindowEvent::MouseInput {
             state,
             button: MouseButton::Left,
             ..
         } => {
             let pressed = *state == ElementState::Pressed;
-            if app.render_mode == 1 && !app.egui_ctx.wants_pointer_input() {
+            if app.is_3d && !app.egui_ctx.wants_pointer_input() {
                 app.input.orbit_dragging = pressed;
             } else {
                 app.input.dragging = pressed;
@@ -112,7 +92,7 @@ pub fn handle_window_event(
             }
 
             if app.input.orbit_dragging
-                && app.render_mode == 1
+                && app.is_3d
                 && !app.egui_ctx.wants_pointer_input()
             {
                 let dx = cx - lx;
@@ -139,7 +119,7 @@ pub fn handle_window_event(
                 return;
             }
 
-            if app.render_mode == 1 {
+            if app.is_3d {
                 let factor = if scroll > 0.0 {
                     1.0 / crate::camera::ZOOM_SPEED
                 } else {

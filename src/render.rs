@@ -64,11 +64,8 @@ pub fn redraw(app: &mut App) {
             });
     });
 
-    // Generate star catalogue before destructuring to avoid borrow conflicts
-    let needs_stars = app.render_mode == 1 && app.show_stars;
-    if needs_stars {
-        app.ensure_star_catalogue();
-    }
+    // Generate star catalogue if dirty
+    app.ensure_star_catalogue();
 
     let (surface, device, queue, config, pipeline, bind_group, texture) = (
         app.surface.as_ref().unwrap(),
@@ -88,14 +85,9 @@ pub fn redraw(app: &mut App) {
         egui_renderer.free_texture(&id);
     }
 
-    // Pre-compute camera values to avoid borrow conflicts
-    let cam_pos = app.camera.position();
-    let cam_target = app.camera.target;
-    let render_mode = app.render_mode;
-    let fov_y = app.camera.fov_y_deg;
-    let show_glow = app.show_glow;
+    let is_3d = app.is_3d;
 
-    let do_compute = render_mode != 1 || show_glow;
+    let do_compute = !is_3d;
     if app.needs_render && do_compute {
         let rgba_buf = app.rgba_buffer.as_ref().unwrap();
         let uniform_buf = app.uniform_buffer.get_or_insert_with(|| {
@@ -113,13 +105,8 @@ pub fn redraw(app: &mut App) {
             app.extent_ly,
             app.center_x,
             app.center_y,
-            app.exposure,
-            app.contrast,
-            render_mode,
-            (cam_pos.x, cam_pos.y, cam_pos.z),
-            (cam_target.x, cam_target.y, cam_target.z),
-            fov_y,
-            app.dust_tau,
+            0.25,  // fixed exposure
+            0.04,  // fixed log_contrast
         );
         queue.write_buffer(uniform_buf, 0, bytemuck::bytes_of(&uniform_data));
 
@@ -141,20 +128,65 @@ pub fn redraw(app: &mut App) {
     }
 
     // ── Star pass: upload catalogue + view-proj matrix ──
-    if app.render_mode == 1 && app.show_stars && !app.star_catalogue.is_empty() {
+    let effective_star_count = if !app.star_catalogue.is_empty() {
         let gpu_stars = app.gpu_stars.as_ref().unwrap();
-        app.write_view_proj_matrix(queue, gpu_stars);
 
-        if !app.star_catalogue_uploaded {
+        // Write view-projection matrix (ortho for 2D, perspective for 3D)
+        if is_3d {
+            let vp = app.camera.view_proj_matrix(app.render_w as f32 / app.render_h as f32);
+            queue.write_buffer(&gpu_stars.camera_buffer, 0, bytemuck::cast_slice(&vp.to_cols_array()));
+        } else {
+            let extent_y = app.extent_ly * (app.render_h as f64 / app.render_w as f64);
+            let vp = crate::camera::Camera::ortho_proj_matrix(
+                app.extent_ly as f32,
+                extent_y as f32,
+                app.center_x as f32,
+                app.center_y as f32,
+                crate::camera::CAMERA_NEAR,
+                crate::camera::CAMERA_FAR,
+            );
+            queue.write_buffer(&gpu_stars.camera_buffer, 0, bytemuck::cast_slice(&vp.to_cols_array()));
+        }
+
+        // Write star params (brightness per mode)
+        let brightness = if is_3d { 1.0 } else { app.star_brightness_2d };
+        let aspect = app.render_w as f32 / app.render_h as f32;
+        let star_uniform: [f32; 4] = [brightness, aspect, app.star_size, 0.0];
+        queue.write_buffer(&gpu_stars.brightness_buffer, 0, bytemuck::cast_slice(&star_uniform));
+
+        // Upload instance data and return effective draw count
+        if is_3d {
+            if !app.star_catalogue_uploaded {
+                let mut header = [0u32; 2];
+                header[0] = app.star_catalogue.len() as u32;
+                header[1] = gpu::MAX_STARS;
+                queue.write_buffer(&gpu_stars.instance_buffer, 0, bytemuck::cast_slice(&header));
+                let data_bytes = bytemuck::cast_slice(&app.star_catalogue);
+                queue.write_buffer(&gpu_stars.instance_buffer, 8, data_bytes);
+                app.star_catalogue_uploaded = true;
+            }
+            app.star_catalogue.len()
+        } else {
+            // 2D mode: AABB cull to viewport, re-upload every frame
+            let extent_y = app.extent_ly * (app.render_h as f64 / app.render_w as f64);
+            let half_x = app.extent_ly * 0.5;
+            let half_z = extent_y * 0.5;
+            let visible = gpu::cull_stars_to_viewport(
+                &app.star_catalogue,
+                app.center_x - half_x, app.center_x + half_x,
+                app.center_y - half_z, app.center_y + half_z,
+            );
             let mut header = [0u32; 2];
-            header[0] = app.star_catalogue.len() as u32;
+            header[0] = visible.len() as u32;
             header[1] = gpu::MAX_STARS;
             queue.write_buffer(&gpu_stars.instance_buffer, 0, bytemuck::cast_slice(&header));
-            let data_bytes = bytemuck::cast_slice(&app.star_catalogue);
+            let data_bytes = bytemuck::cast_slice(&visible);
             queue.write_buffer(&gpu_stars.instance_buffer, 8, data_bytes);
-            app.star_catalogue_uploaded = true;
+            visible.len()
         }
-    }
+    } else {
+        0
+    };
 
     let frame = match surface.get_current_texture() {
         Ok(f) => f,
@@ -175,13 +207,12 @@ pub fn redraw(app: &mut App) {
         .create_view(&wgpu::TextureViewDescriptor::default());
 
     let star_draw_data =
-        if app.render_mode == 1 && app.show_stars && !app.star_catalogue.is_empty() {
+        if effective_star_count > 0 {
             let gpu_stars = app.gpu_stars.as_ref().unwrap();
-            let n = app.star_catalogue.len();
             Some((
                 &gpu_stars.pipeline,
                 &gpu_stars.bind_group as &wgpu::BindGroup,
-                n,
+                effective_star_count,
             ))
         } else {
             None
@@ -230,7 +261,7 @@ pub fn redraw(app: &mut App) {
         })
         .forget_lifetime();
 
-        if render_mode != 1 || show_glow {
+        if !is_3d {
             rpass.set_pipeline(pipeline);
             rpass.set_bind_group(0, bind_group, &[]);
             rpass.draw(0..3, 0..1);

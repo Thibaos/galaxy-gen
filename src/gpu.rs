@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use bytemuck::{Pod, Zeroable};
 
 use crate::galaxy::GalaxyParams;
@@ -85,22 +83,24 @@ impl GpuCompute {
         uniform_buffer: &wgpu::Buffer,
         rgba_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        self.scene_bind_group.get_or_insert_with(|| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("scene"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: rgba_buffer.as_entire_binding(),
-                    },
-                ],
+        self.scene_bind_group
+            .get_or_insert_with(|| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("scene"),
+                    layout: &self.bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: rgba_buffer.as_entire_binding(),
+                        },
+                    ],
+                })
             })
-        }).clone()
+            .clone()
     }
 
     /// Drop the cached bind group (call when rgba_buffer is recreated).
@@ -134,16 +134,6 @@ pub struct GalaxyUniform {
     pub center_y: f32,
     pub exposure: f32,
     pub log_contrast: f32,
-    // ── 3D camera / render mode ──
-    pub render_mode: u32,
-    pub camera_x: f32,
-    pub camera_y: f32,
-    pub camera_z: f32,
-    pub camera_target_x: f32,
-    pub camera_target_y: f32,
-    pub camera_target_z: f32,
-    pub fov_y_deg: f32,
-    pub dust_tau: f32,
 }
 
 impl GalaxyUniform {
@@ -156,11 +146,6 @@ impl GalaxyUniform {
         center_y: f64,
         exposure: f32,
         contrast: f32,
-        render_mode: u32,
-        camera_pos: (f32, f32, f32),
-        camera_target: (f32, f32, f32),
-        fov_y_deg: f32,
-        dust_tau: f32,
     ) -> Self {
         Self {
             disk_scale_length: params.disk_scale_length as f32,
@@ -182,15 +167,6 @@ impl GalaxyUniform {
             center_y: center_y as f32,
             exposure,
             log_contrast: contrast,
-            render_mode,
-            camera_x: camera_pos.0,
-            camera_y: camera_pos.1,
-            camera_z: camera_pos.2,
-            camera_target_x: camera_target.0,
-            camera_target_y: camera_target.1,
-            camera_target_z: camera_target.2,
-            fov_y_deg,
-            dust_tau,
         }
     }
 }
@@ -599,6 +575,27 @@ impl GpuStars {
     }
 }
 
+/// Filter star instances to those within the 2D ortho viewport rectangle.
+/// Returns a subset of `catalogue` whose (pos_x, pos_z) fall within the
+/// given world-space XZ bounds.
+pub fn cull_stars_to_viewport(
+    catalogue: &[StarInstance],
+    min_x: f64,
+    max_x: f64,
+    min_z: f64,
+    max_z: f64,
+) -> Vec<StarInstance> {
+    catalogue
+        .iter()
+        .filter(|s| {
+            let x = s.pos_x as f64;
+            let z = s.pos_z as f64;
+            x >= min_x && x <= max_x && z >= min_z && z <= max_z
+        })
+        .copied()
+        .collect()
+}
+
 /// Single-pass unified galaxy render.
 ///
 /// No CPU readback — the `render_scene` compute shader handles everything
@@ -619,8 +616,6 @@ pub fn compute_galaxy(
         image_w > 0 && image_w < 65536 && image_h > 0 && image_h < 65536,
         "image dimensions out of range"
     );
-
-    let total = Instant::now();
 
     // ── uniforms (pre-written by caller) ────────────────────
 
@@ -667,34 +662,10 @@ pub fn compute_galaxy(
     );
 
     queue.submit(Some(encoder.finish()));
-
-    println!("frame time: {:.2?}", total.elapsed());
 }
 
 #[cfg(test)]
 mod tests {
-    // ── Host-side replicas of shader star-colour functions ──
-
-    const T_SOLAR_HOST: f64 = 5770.0;
-
-    fn host_mass_to_temp(m: f64) -> f64 {
-        if m <= 0.08 {
-            return 2300.0;
-        }
-        let (ref_m, ref_t, exp) = if m < 0.50 {
-            (0.16, 3060.0, 0.53)
-        } else if m < 1.0 {
-            (0.88, 5240.0, 0.67)
-        } else if m < 2.40 {
-            (1.00, T_SOLAR_HOST, 0.57)
-        } else if m < 7.0 {
-            (2.40, 9700.0, 0.36)
-        } else {
-            (15.0, 30000.0, 0.20)
-        };
-        (ref_t * (m / ref_m).powf(exp)).min(50000.0)
-    }
-
     const COLOR_LUT_HOST: [(f64, f64, f64, f64); 16] = [
         (2300.0, 1.000, 0.745, 0.424),
         (2600.0, 1.000, 0.765, 0.427),
@@ -714,53 +685,14 @@ mod tests {
         (50000.0, 0.608, 0.690, 1.000),
     ];
 
-    fn host_temperature_to_rgb(t_kelvin: f64) -> (f64, f64, f64) {
-        let t = t_kelvin.clamp(COLOR_LUT_HOST[0].0, COLOR_LUT_HOST[15].0);
-        if t <= COLOR_LUT_HOST[0].0 {
-            return (
-                COLOR_LUT_HOST[0].1,
-                COLOR_LUT_HOST[0].2,
-                COLOR_LUT_HOST[0].3,
-            );
-        }
-        for i in 0..(COLOR_LUT_HOST.len() - 1) {
-            if t <= COLOR_LUT_HOST[i + 1].0 {
-                let t_lo = COLOR_LUT_HOST[i].0;
-                let t_hi = COLOR_LUT_HOST[i + 1].0;
-                let frac = (t - t_lo) / (t_hi - t_lo);
-                let r =
-                    COLOR_LUT_HOST[i].1 + frac * (COLOR_LUT_HOST[i + 1].1 - COLOR_LUT_HOST[i].1);
-                let g =
-                    COLOR_LUT_HOST[i].2 + frac * (COLOR_LUT_HOST[i + 1].2 - COLOR_LUT_HOST[i].2);
-                let b =
-                    COLOR_LUT_HOST[i].3 + frac * (COLOR_LUT_HOST[i + 1].3 - COLOR_LUT_HOST[i].3);
-                return (r, g, b);
-            }
-        }
-        let last = COLOR_LUT_HOST[15];
-        (last.1, last.2, last.3)
-    }
     use super::*;
     use crate::galaxy::GalaxyParams;
 
     #[test]
     fn from_params_preserves_values() {
         let params = GalaxyParams::milky_way();
-        let uniform = GalaxyUniform::from_params(
-            &params,
-            1920,
-            1080,
-            512_000.0,
-            0.0,
-            0.0,
-            0.60,
-            0.04,
-            0,
-            (0.0, 5000.0, 0.0),
-            (0.0, 0.0, 0.0),
-            45.0,
-            0.2,
-        );
+        let uniform =
+            GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
 
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
         assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
@@ -795,21 +727,8 @@ mod tests {
     #[test]
     fn from_params_preserves_values_ngc628() {
         let params = GalaxyParams::ngc628();
-        let uniform = GalaxyUniform::from_params(
-            &params,
-            1920,
-            1080,
-            512_000.0,
-            0.0,
-            0.0,
-            0.60,
-            0.04,
-            0,
-            (0.0, 5000.0, 0.0),
-            (0.0, 0.0, 0.0),
-            45.0,
-            0.2,
-        );
+        let uniform =
+            GalaxyUniform::from_params(&params, 1920, 1080, 512_000.0, 0.0, 0.0, 0.60, 0.04);
 
         assert_eq!(uniform.disk_scale_length, params.disk_scale_length as f32);
         assert_eq!(uniform.disk_scale_height, params.disk_scale_height as f32);
@@ -837,21 +756,8 @@ mod tests {
     #[test]
     fn from_params_with_nonzero_center() {
         let params = GalaxyParams::milky_way();
-        let uniform = GalaxyUniform::from_params(
-            &params,
-            800,
-            600,
-            100_000.0,
-            5000.0,
-            -2000.0,
-            0.50,
-            0.02,
-            0,
-            (0.0, 5000.0, 0.0),
-            (0.0, 0.0, 0.0),
-            45.0,
-            0.2,
-        );
+        let uniform =
+            GalaxyUniform::from_params(&params, 800, 600, 100_000.0, 5000.0, -2000.0, 0.50, 0.02);
         assert_eq!(uniform.center_x, 5000.0_f32);
         assert_eq!(uniform.center_y, -2000.0_f32);
         assert_eq!(uniform.extent, 100_000.0_f32);
@@ -865,21 +771,7 @@ mod tests {
     fn uniform_is_pod() {
         // Verify bytemuck traits work
         let params = GalaxyParams::milky_way();
-        let uniform = GalaxyUniform::from_params(
-            &params,
-            100,
-            100,
-            1000.0,
-            0.0,
-            0.0,
-            0.5,
-            0.05,
-            0,
-            (0.0, 5000.0, 0.0),
-            (0.0, 0.0, 0.0),
-            45.0,
-            0.2,
-        );
+        let uniform = GalaxyUniform::from_params(&params, 100, 100, 1000.0, 0.0, 0.0, 0.5, 0.05);
         let _bytes: &[u8] = bytemuck::bytes_of(&uniform);
         // If this compiles and doesn't panic, Pod+Zeroable is satisfied
     }
@@ -887,7 +779,7 @@ mod tests {
     #[test]
     fn uniform_struct_size_matches_fields() {
         // Runtime size check as a cross-check against shader-side layout mismatch
-        let expected = std::mem::size_of::<f32>() * 24 + std::mem::size_of::<u32>() * 4;
+        let expected = std::mem::size_of::<f32>() * 15 + std::mem::size_of::<u32>() * 4;
         assert_eq!(std::mem::size_of::<GalaxyUniform>(), expected);
     }
 
@@ -1223,7 +1115,7 @@ mod tests {
 
         assert_eq!(
             size_of::<GalaxyUniform>(),
-            112,
+            76,
             "overall size mismatch with shader"
         );
 
@@ -1246,248 +1138,6 @@ mod tests {
         assert_eq!(offset_of!(GalaxyUniform, center_y), 64);
         assert_eq!(offset_of!(GalaxyUniform, exposure), 68);
         assert_eq!(offset_of!(GalaxyUniform, log_contrast), 72);
-        assert_eq!(offset_of!(GalaxyUniform, render_mode), 76);
-        assert_eq!(offset_of!(GalaxyUniform, camera_x), 80);
-        assert_eq!(offset_of!(GalaxyUniform, camera_y), 84);
-        assert_eq!(offset_of!(GalaxyUniform, camera_z), 88);
-        assert_eq!(offset_of!(GalaxyUniform, camera_target_x), 92);
-        assert_eq!(offset_of!(GalaxyUniform, camera_target_y), 96);
-        assert_eq!(offset_of!(GalaxyUniform, camera_target_z), 100);
-        assert_eq!(offset_of!(GalaxyUniform, fov_y_deg), 104);
-        assert_eq!(offset_of!(GalaxyUniform, dust_tau), 108);
-    }
-
-    // ── New star colour tests ─────────────────────────
-
-    #[test]
-    fn mass_to_temp_produces_correct_teff() {
-        // Empirical reference values from Pecaut & Mamajek (2013), Eker et al. (2018).
-        // The piecewise power-law fit is approximate; tolerance scales with Teff.
-        let cases: &[(f64, f64, f64)] = &[
-            (0.08, 2300.0, 1.0), // clamped
-            (0.16, 3060.0, 1.0), // exact anchor
-            (0.50, 3750.0, 500.0),
-            (0.88, 5240.0, 1.0), // exact anchor
-            (1.00, 5770.0, 1.0), // exact anchor (solar segment)
-            (2.00, 8180.0, 500.0),
-            (2.40, 9700.0, 1.0),     // exact anchor
-            (7.00, 22000.0, 4000.0), // discontinuity at breakpoint
-            (15.0, 30000.0, 1.0),    // exact anchor
-        ];
-        for &(mass, expected_teff, tol) in cases {
-            let teff = host_mass_to_temp(mass);
-            assert!(
-                (teff - expected_teff).abs() < tol,
-                "mass_to_temp({mass}) = {teff}, expected ~{expected_teff} (tol {tol})"
-            );
-        }
-    }
-
-    #[test]
-    fn mass_to_temp_monotonic() {
-        let mut prev = host_mass_to_temp(0.05);
-        for mass in [
-            0.08_f64, 0.1, 0.2, 0.5, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0,
-        ] {
-            let t = host_mass_to_temp(mass);
-            assert!(t >= prev, "mass_to_temp({mass}) = {t} < prev {prev}");
-            prev = t;
-        }
-    }
-
-    #[test]
-    fn temperature_to_rgb_sun_is_white() {
-        let (r, g, b) = host_temperature_to_rgb(5770.0);
-        assert!((r - 1.0).abs() < 0.01);
-        assert!(g > 0.95 && g < 1.0, "G={g} should be ~0.961");
-        assert!(b > 0.93 && b < 0.97, "B={b} should be ~0.949");
-    }
-
-    #[test]
-    fn temperature_to_rgb_no_green_stars() {
-        for t_k in [
-            2500.0_f64, 3500.0, 4500.0, 5770.0, 7000.0, 8200.0, 10000.0, 15000.0,
-        ] {
-            let (r, g, b) = host_temperature_to_rgb(t_k);
-            if t_k < 6200.0 {
-                // Cool stars are R-dominant (orange/white, never green)
-                assert!(
-                    r >= g && g >= b,
-                    "at {t_k}K: R={r:.3} G={g:.3} B={b:.3} — expected R≥G≥B"
-                );
-            } else {
-                // Hot stars are B-dominant (blue/white, never green)
-                assert!(
-                    b >= g && g >= r,
-                    "at {t_k}K: R={r:.3} G={g:.3} B={b:.3} — expected B≥G≥R"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn no_channel_is_ever_the_maximum_alone() {
-        // Green should never be the sole max channel (no green stars)
-        for t_k in [
-            2300_f64, 3060., 3750., 4400., 5240., 5770., 6540., 7220., 8180., 9700., 15200.,
-            26500., 41400., 50000.,
-        ] {
-            let (r, g, b) = host_temperature_to_rgb(t_k);
-            assert!(
-                !(g > r && g > b),
-                "green is max at {t_k}K: R={r:.3} G={g:.3} B={b:.3}"
-            );
-        }
-    }
-
-    #[test]
-    fn temperature_to_rgb_m_dwarfs_are_orange() {
-        let (r, g, b) = host_temperature_to_rgb(3750.0);
-        assert!((r - 1.0).abs() < 0.01, "M dwarf R={r} should be 1.0");
-        assert!(g > 0.70 && g < 0.85, "M dwarf G={g} should be ~0.765");
-        assert!(b > 0.45 && b < 0.65, "M dwarf B={b} should be ~0.545");
-        assert!(g > 0.5, "M dwarf G={g} > 0.5 (orange, not red)");
-        assert!(r > g && g > b, "M dwarf: R > G > B (orange, not red)");
-    }
-
-    #[test]
-    fn temperature_to_rgb_o_stars_are_blue() {
-        let (r, g, b) = host_temperature_to_rgb(41400.0);
-        assert!(b > 0.99, "O star B should be ~1.0");
-        assert!(r > 0.55 && r < 0.70, "O star R={r} should be ~0.61");
-        assert!(g > 0.60 && g < 0.75, "O star G={g} should be ~0.69");
-        assert!(b > g && g > r, "O star: expected B > G > R");
-    }
-
-    #[test]
-    fn temperature_to_rgb_monotonic_channels() {
-        let mut prev_r = 2.0;
-        let mut prev_b = -1.0;
-        for t in [
-            2300_f64, 3060., 3750., 4400., 5240., 5770., 6540., 7220., 8180., 9700., 15200., 26500.,
-        ] {
-            let (r, _g, b) = host_temperature_to_rgb(t);
-            assert!(r <= prev_r + 0.001, "R({t}) = {r} > prev {prev_r}");
-            assert!(b >= prev_b - 0.001, "B({t}) = {b} < prev {prev_b}");
-            prev_r = r;
-            prev_b = b;
-        }
-    }
-
-    #[test]
-    fn cell_star_light_with_new_teff_gives_plausible_colors() {
-        let test_masses = [0.1_f64, 0.3, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0];
-        for &mass in &test_masses {
-            let teff = host_mass_to_temp(mass);
-            let (r, g, b) = host_temperature_to_rgb(teff);
-            assert!((0.0..=1.0).contains(&r), "mass={mass}: R={r} out of range");
-            assert!((0.0..=1.0).contains(&g), "mass={mass}: G={g} out of range");
-            assert!((0.0..=1.0).contains(&b), "mass={mass}: B={b} out of range");
-            let max_ch = r.max(g).max(b);
-            assert!(
-                (max_ch - 1.0).abs() < 0.01,
-                "mass={mass}: no channel near 1.0 (R={r}, G={g}, B={b})"
-            );
-        }
-    }
-
-    #[test]
-    fn lut_entries_are_sorted_by_temperature() {
-        for i in 0..(COLOR_LUT_HOST.len() - 1) {
-            assert!(
-                COLOR_LUT_HOST[i].0 < COLOR_LUT_HOST[i + 1].0,
-                "LUT entry {i} Teff={} >= entry {} Teff={}",
-                COLOR_LUT_HOST[i].0,
-                i + 1,
-                COLOR_LUT_HOST[i + 1].0
-            );
-        }
-    }
-
-    // ── 3D density tests ──────────────────────────────
-
-    fn host_disk_density_3d(x: f64, y: f64, z: f64, p: &GalaxyParams) -> f64 {
-        if p.disk_scale_length <= 0.0 || p.disk_scale_height <= 0.0 {
-            return 0.0;
-        }
-        let r = (x * x + z * z).sqrt();
-        let sech = 1.0 / (y / (2.0 * p.disk_scale_height)).cosh();
-        p.disk_central_density * 0.5 * (-r / p.disk_scale_length).exp() * sech * sech
-    }
-
-    fn host_bulge_density_3d(x: f64, y: f64, z: f64, p: &GalaxyParams) -> f64 {
-        if p.bulge_radius <= 0.0 {
-            return 0.0;
-        }
-        let r2 = x * x + y * y + z * z;
-        let x2 = r2 / (p.bulge_radius * p.bulge_radius);
-        p.bulge_central_density * (1.0 + x2).powf(-2.5)
-    }
-
-    #[test]
-    fn disk_density_3d_midplane_matches_2d_profile() {
-        let p = GalaxyParams::milky_way();
-        // Normalization check: ∫ ρ₃D(R,y) dy must equal the existing column(R).
-        //   column(0) = 2·hz·ρ₀  (disk_column at r=0)
-        //   ∫ ρ₃D(0,y) dy = ∫ ρ₀·0.5·sech²(y/2hz) dy = ρ₀·0.5·4hz = 2·hz·ρ₀ ✓
-        // Therefore midplane density = column(0) / (4·hz)
-        let col = 2.0 * p.disk_scale_height * p.disk_central_density; // disk_column(0) simplified
-        let dens = host_disk_density_3d(0.0, 0.0, 0.0, &p);
-        let expected = col / (4.0 * p.disk_scale_height);
-        assert!(
-            (dens - expected).abs() < 1e-10,
-            "midplane density {dens} != column/(4hz) = {expected}"
-        );
-    }
-
-    #[test]
-    fn disk_density_3d_decays_vertically() {
-        let p = GalaxyParams::milky_way();
-        let d0 = host_disk_density_3d(0.0, 0.0, 0.0, &p);
-        let d1 = host_disk_density_3d(0.0, p.disk_scale_height, 0.0, &p);
-        let d2 = host_disk_density_3d(0.0, 2.0 * p.disk_scale_height, 0.0, &p);
-        assert!(d0 > 0.0);
-        assert!(d1 < d0, "density should decrease with |y|");
-        assert!(d2 < d1, "density should continue decreasing");
-        // sech²(0.5) ≈ 0.786 at y = hz
-        let sech_at_hz = 1.0 / (0.5_f64.cosh());
-        let expected_ratio = sech_at_hz * sech_at_hz;
-        let actual_ratio = d1 / d0;
-        assert!(
-            (actual_ratio - expected_ratio).abs() < 0.001,
-            "density at y=hz / d0 = {actual_ratio}, expected {expected_ratio}"
-        );
-    }
-
-    #[test]
-    fn disk_density_3d_sech_squared_profile() {
-        // Verify sech² shape: density(y) / density(0) = sech²(y/2hz)
-        let p = GalaxyParams::milky_way();
-        for &y in &[0.0_f64, 500.0, 1000.0, 2000.0] {
-            let dens = host_disk_density_3d(0.0, y, 0.0, &p);
-            let expected = p.disk_central_density
-                * 0.5
-                * (1.0 / (y / (2.0 * p.disk_scale_height)).cosh()).powi(2);
-            assert!(
-                (dens - expected).abs() < 1e-12,
-                "density at y={y} = {dens}, expected {expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn bulge_density_3d_plummer_profile() {
-        let p = GalaxyParams::milky_way();
-        let d0 = host_bulge_density_3d(0.0, 0.0, 0.0, &p);
-        let da = host_bulge_density_3d(p.bulge_radius, 0.0, 0.0, &p);
-        assert!(d0 > 0.0);
-        // Plummer 3D: ρ(R) ∝ (1 + R²/a²)^(-2.5). At R=a: (1+1)^(-2.5) = 2^(-2.5) ≈ 0.1768
-        let expected_ratio = 2.0_f64.powf(-2.5);
-        let actual_ratio = da / d0;
-        assert!(
-            (actual_ratio - expected_ratio).abs() < 0.001,
-            "bulge 3D at R=a / d0 = {actual_ratio}, expected {expected_ratio}"
-        );
     }
 
     #[test]
@@ -1512,24 +1162,9 @@ mod tests {
     #[test]
     fn uniform_new_fields_have_reasonable_defaults() {
         let params = GalaxyParams::milky_way();
-        let uniform = GalaxyUniform::from_params(
-            &params,
-            800,
-            600,
-            100_000.0,
-            0.0,
-            0.0,
-            0.5,
-            0.05,
-            0,
-            (0.0, 5000.0, 0.0),
-            (0.0, 0.0, 0.0),
-            45.0,
-            0.2,
-        );
-        assert_eq!(uniform.render_mode, 0);
-        assert_eq!(uniform.fov_y_deg, 45.0);
-        assert!(uniform.camera_y > 0.0, "camera should be above the disk");
+        let uniform = GalaxyUniform::from_params(&params, 800, 600, 100_000.0, 0.0, 0.0, 0.5, 0.05);
+        assert_eq!(uniform.exposure, 0.5);
+        assert_eq!(uniform.log_contrast, 0.05);
     }
 
     // ── Star catalogue characterisation tests ────────────────
@@ -1563,10 +1198,16 @@ mod tests {
         let catalogue = generate_star_catalogue(&GalaxyParams::milky_way(), 1000);
         assert_eq!(catalogue.len(), 1000);
         for star in &catalogue {
-            assert!(star.mass > 0.08 && star.mass < 100.0,
-                "mass {} out of range", star.mass);
-            assert!(star.temp >= 2300.0 && star.temp <= 50000.0,
-                "temp {} out of range", star.temp);
+            assert!(
+                star.mass > 0.08 && star.mass < 100.0,
+                "mass {} out of range",
+                star.mass
+            );
+            assert!(
+                star.temp >= 2300.0 && star.temp <= 50000.0,
+                "temp {} out of range",
+                star.temp
+            );
             assert!(star.lum > 0.0, "lum {} <= 0", star.lum);
         }
     }
@@ -1583,10 +1224,28 @@ mod tests {
             z_min = z_min.min(star.pos_z);
             z_max = z_max.max(star.pos_z);
         }
-        assert!(x_max - x_min > 40_000.0, "x span {} too small", x_max - x_min);
-        assert!(z_max - z_min > 40_000.0, "z span {} too small", z_max - z_min);
-        assert!(x_min < -20_000.0 && x_max > 20_000.0, "x range {}..{} not spanning origin", x_min, x_max);
-        assert!(z_min < -20_000.0 && z_max > 20_000.0, "z range {}..{} not spanning origin", z_min, z_max);
+        assert!(
+            x_max - x_min > 40_000.0,
+            "x span {} too small",
+            x_max - x_min
+        );
+        assert!(
+            z_max - z_min > 40_000.0,
+            "z span {} too small",
+            z_max - z_min
+        );
+        assert!(
+            x_min < -20_000.0 && x_max > 20_000.0,
+            "x range {}..{} not spanning origin",
+            x_min,
+            x_max
+        );
+        assert!(
+            z_min < -20_000.0 && z_max > 20_000.0,
+            "z range {}..{} not spanning origin",
+            z_min,
+            z_max
+        );
     }
 
     /// Bulge region is significantly enriched over the outer disc.
@@ -1594,10 +1253,12 @@ mod tests {
     fn star_catalogue_bulge_enriched_over_outer_disc() {
         let params = GalaxyParams::milky_way();
         let catalogue = generate_star_catalogue(&params, 10_000);
-        let centre_count = catalogue.iter()
+        let centre_count = catalogue
+            .iter()
             .filter(|s| s.pos_x.powi(2) + s.pos_z.powi(2) < 5000.0_f32.powi(2))
             .count() as f64;
-        let outer_count = catalogue.iter()
+        let outer_count = catalogue
+            .iter()
             .filter(|s| {
                 let r = (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt();
                 r > 40_000.0 && r < 45_000.0
@@ -1607,7 +1268,11 @@ mod tests {
         let outer_area = std::f64::consts::PI * (45_000.0_f64.powi(2) - 40_000.0_f64.powi(2));
         let outer_density = outer_count / outer_area;
         let ratio = centre_density / outer_density;
-        assert!(ratio > 10.0, "bulge enrichment ratio {} should exceed 10", ratio);
+        assert!(
+            ratio > 10.0,
+            "bulge enrichment ratio {} should exceed 10",
+            ratio
+        );
     }
 
     /// Different presets produce different catalogues.
@@ -1623,13 +1288,119 @@ mod tests {
     fn star_catalogue_ngc628_more_extended_than_milky_way() {
         let mw = generate_star_catalogue(&GalaxyParams::milky_way(), 5000);
         let ngc = generate_star_catalogue(&GalaxyParams::ngc628(), 5000);
-        let mw_extent = mw.iter()
+        let mw_extent = mw
+            .iter()
             .map(|s| (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt())
             .fold(0.0_f32, f32::max);
-        let ngc_extent = ngc.iter()
+        let ngc_extent = ngc
+            .iter()
             .map(|s| (s.pos_x.powi(2) + s.pos_z.powi(2)).sqrt())
             .fold(0.0_f32, f32::max);
-        assert!(ngc_extent > mw_extent,
-            "NGC 628 extent {} should exceed MW extent {}", ngc_extent, mw_extent);
+        assert!(
+            ngc_extent > mw_extent,
+            "NGC 628 extent {} should exceed MW extent {}",
+            ngc_extent,
+            mw_extent
+        );
+    }
+
+    // ── AABB cull filter tests ─────────────────────────────
+
+    #[test]
+    fn cull_stars_to_viewport_empty_catalogue() {
+        let empty: Vec<StarInstance> = Vec::new();
+        let result = cull_stars_to_viewport(&empty, 0.0, 100.0, 0.0, 100.0);
+        assert!(result.is_empty(), "empty catalogue should return empty");
+    }
+
+    #[test]
+    fn cull_stars_to_viewport_all_inside() {
+        let stars = vec![
+            StarInstance {
+                pos_x: 10.0,
+                pos_y: 0.0,
+                pos_z: 20.0,
+                mass: 1.0,
+                temp: 5770.0,
+                lum: 1.0,
+                _pad: 0,
+            },
+            StarInstance {
+                pos_x: -5.0,
+                pos_y: 0.0,
+                pos_z: 15.0,
+                mass: 1.0,
+                temp: 5770.0,
+                lum: 1.0,
+                _pad: 0,
+            },
+        ];
+        let result = cull_stars_to_viewport(&stars, -10.0, 50.0, -10.0, 50.0);
+        assert_eq!(
+            result.len(),
+            2,
+            "all stars inside bounds should be returned"
+        );
+    }
+
+    #[test]
+    fn cull_stars_to_viewport_all_outside() {
+        let stars = vec![
+            StarInstance {
+                pos_x: 200.0,
+                pos_y: 0.0,
+                pos_z: 200.0,
+                mass: 1.0,
+                temp: 5770.0,
+                lum: 1.0,
+                _pad: 0,
+            },
+            StarInstance {
+                pos_x: -200.0,
+                pos_y: 0.0,
+                pos_z: -200.0,
+                mass: 1.0,
+                temp: 5770.0,
+                lum: 1.0,
+                _pad: 0,
+            },
+        ];
+        let result = cull_stars_to_viewport(&stars, -50.0, 50.0, -50.0, 50.0);
+        assert_eq!(
+            result.len(),
+            0,
+            "all stars outside bounds should be filtered"
+        );
+    }
+
+    #[test]
+    fn cull_stars_to_viewport_mixed() {
+        let stars = vec![
+            StarInstance {
+                pos_x: 10.0,
+                pos_y: 0.0,
+                pos_z: 20.0,
+                mass: 1.0,
+                temp: 5770.0,
+                lum: 1.0,
+                _pad: 0,
+            },
+            StarInstance {
+                pos_x: 100.0,
+                pos_y: 0.0,
+                pos_z: 200.0,
+                mass: 1.0,
+                temp: 5770.0,
+                lum: 1.0,
+                _pad: 0,
+            },
+        ];
+        let result = cull_stars_to_viewport(&stars, -50.0, 50.0, -50.0, 50.0);
+        assert_eq!(
+            result.len(),
+            1,
+            "only the star inside bounds should be returned"
+        );
+        assert_eq!(result[0].pos_x, 10.0);
     }
 }
